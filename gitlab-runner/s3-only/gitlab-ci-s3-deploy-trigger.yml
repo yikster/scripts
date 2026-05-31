@@ -1,0 +1,98 @@
+# =============================================================================
+# gitlab-ci-s3-deploy-trigger.yml
+# -----------------------------------------------------------------------------
+# Reference .gitlab-ci.yml for the S3-ONLY runner (S3-event offload pattern).
+#
+# The runner can ONLY reach S3 + IMDS. It therefore does NOT run cdk/npm/pip.
+# It packages the repo, uploads it to a TRIGGER bucket with SSE-KMS, then polls a
+# STATUS bucket for the result written by CodeBuild (which runs in the deploy
+# account and does the real cdk deploy / cross-account AssumeRole / CodeArtifact).
+#
+# Runner IAM: S3 (trigger+status) + KMS only. No sts/cfn/codebuild/codeartifact/ecr.
+#
+# Prereqs (see target-account-pipeline.md + iam/*.json):
+#   - TRIGGER_BUCKET has EventBridge notifications enabled -> EventBridge rule ->
+#     CodePipeline (S3 source) -> CodeBuild runs cdk deploy.
+#   - CodeBuild writes s3://STATUS_BUCKET/runs/<id>/status.json {"exit_code":N}.
+#   - A customer-managed KMS CMK is usable by both the runner and deploy accounts.
+# =============================================================================
+
+variables:
+  AWS_REGION: "ap-northeast-2"
+  AWS_DEFAULT_REGION: "ap-northeast-2"
+  TRIGGER_BUCKET: "trigger-bucket"
+  STATUS_BUCKET: "status-bucket"
+  KMS_KEY_ARN: "arn:aws:kms:ap-northeast-2:RUNNER-ACCOUNT:key/KEY-ID"
+  # Poll guard: 120 * 30s = 60 min cap.
+  POLL_MAX_ATTEMPTS: "120"
+  POLL_INTERVAL_SEC: "30"
+  GIT_DEPTH: "20"
+
+stages:
+  - trigger
+
+# -----------------------------------------------------------------------------
+# A single job that does package -> upload -> poll. The runner needs no runtimes
+# here (pure git + aws-cli), but mise shims are harmless if present.
+# -----------------------------------------------------------------------------
+deploy-via-s3-offload:
+  stage: trigger
+  tags:
+    - shell
+    - s3only
+  script:
+    - set -euo pipefail
+    # Stable run id for this pipeline+commit (lets the status poll find the right object).
+    - RUN_ID="${CI_PROJECT_PATH_SLUG}-${CI_COMMIT_SHORT_SHA}-${CI_PIPELINE_ID}"
+    - 'echo "RUN_ID=${RUN_ID}"'
+    # 1) Package the repo source (no synth on the runner).
+    - PKG="source-${RUN_ID}.zip"
+    - git archive --format=zip -o "${PKG}" HEAD
+    # 2) Upload to the trigger bucket with SSE-KMS (bucket policy denies non-KMS puts).
+    - |
+      aws s3 cp "${PKG}" "s3://${TRIGGER_BUCKET}/runs/${RUN_ID}/source.zip" \
+        --region "${AWS_REGION}" \
+        --sse aws:kms --sse-kms-key-id "${KMS_KEY_ARN}"
+    - 'echo "uploaded s3://${TRIGGER_BUCKET}/runs/${RUN_ID}/source.zip - CodeBuild will pick it up"'
+    # 3) Poll the status bucket for CodeBuild's result. Exit with its code so GitLab shows pass/fail.
+    - STATUS_KEY="runs/${RUN_ID}/status.json"
+    - attempt=0
+    - |
+      while :; do
+        attempt=$((attempt+1))
+        if aws s3api head-object --bucket "${STATUS_BUCKET}" --key "${STATUS_KEY}" --region "${AWS_REGION}" >/dev/null 2>&1; then
+          aws s3 cp "s3://${STATUS_BUCKET}/${STATUS_KEY}" ./status.json --region "${AWS_REGION}" --only-show-errors
+          echo "----- status.json -----"; cat ./status.json
+          if command -v jq >/dev/null 2>&1; then
+            code="$(jq -r '.exit_code // 1' ./status.json)"
+          else
+            code="$(sed -n 's/.*"exit_code"[[:space:]]*:[[:space:]]*\([0-9]\+\).*/\1/p' ./status.json | head -n1)"
+            code="${code:-1}"
+          fi
+          echo "CodeBuild exit_code=${code}"
+          exit "${code}"
+        fi
+        if [ "${attempt}" -ge "${POLL_MAX_ATTEMPTS}" ]; then
+          echo "polling timeout after ${POLL_MAX_ATTEMPTS} attempts (no status.json)"; exit 1
+        fi
+        echo "[${attempt}/${POLL_MAX_ATTEMPTS}] waiting for status..."
+        sleep "${POLL_INTERVAL_SEC}"
+      done
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+# =============================================================================
+# [NOTE] Why this is all the runner does:
+#   - source.zip upload is the ONLY mutation the runner performs (S3 PutObject).
+#   - SSE-KMS is mandatory (the trigger bucket policy denies unencrypted puts).
+#   - The runner reads status.json via S3 GetObject; it never calls CloudFormation,
+#     STS AssumeRole, CodeArtifact, ECR, or CodeBuild (all unreachable on S3-only).
+#
+# [NOTE] Cross-account: if TRIGGER_BUCKET lives in the deploy account, the runner's
+#   role needs the bucket's resource policy to allow its PutObject (see
+#   iam/trigger-bucket-policy.json) AND the runner IAM to allow s3:PutObject
+#   (iam/runner-minimal-policy.json) - both are required for cross-account S3.
+#
+# [NOTE] The actual cdk deploy / npm ci / pip install / multi-account AssumeRole all
+#   happen inside CodeBuild in the deploy account - see target-account-pipeline.md.
+# =============================================================================

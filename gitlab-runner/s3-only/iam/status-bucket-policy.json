@@ -1,0 +1,46 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowRunnerRoleReadStatus",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::RUNNER-ACCOUNT:role/RunnerRole"
+      },
+      "Action": [
+        "s3:GetObject",
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::status-bucket",
+        "arn:aws:s3:::status-bucket/*"
+      ]
+    },
+    {
+      "Sid": "AllowDeployAccountCodeBuildWriteStatus",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::DEPLOY-ACCOUNT:role/CodeBuildDeployRole"
+      },
+      "Action": [
+        "s3:PutObject"
+      ],
+      "Resource": "arn:aws:s3:::status-bucket/*"
+    },
+    {
+      "Sid": "DenyInsecureTransport",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": "s3:*",
+      "Resource": [
+        "arn:aws:s3:::status-bucket",
+        "arn:aws:s3:::status-bucket/*"
+      ],
+      "Condition": {
+        "Bool": {
+          "aws:SecureTransport": "false"
+        }
+      }
+    }
+  ]
+}

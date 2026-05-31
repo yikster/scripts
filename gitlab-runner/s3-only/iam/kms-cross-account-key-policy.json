@@ -1,0 +1,43 @@
+{
+  "Version": "2012-10-17",
+  "Id": "s3-offload-cmk",
+  "Statement": [
+    {
+      "Sid": "EnableRootAdminInKeyOwnerAccount",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::RUNNER-ACCOUNT:root"
+      },
+      "Action": "kms:*",
+      "Resource": "*"
+    },
+    {
+      "Sid": "AllowRunnerAccountUseForSseKms",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::RUNNER-ACCOUNT:root"
+      },
+      "Action": [
+        "kms:Decrypt",
+        "kms:GenerateDataKey",
+        "kms:GenerateDataKey*",
+        "kms:DescribeKey"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "AllowDeployAccountUseForSseKms",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::DEPLOY-ACCOUNT:root"
+      },
+      "Action": [
+        "kms:Decrypt",
+        "kms:GenerateDataKey",
+        "kms:GenerateDataKey*",
+        "kms:DescribeKey"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

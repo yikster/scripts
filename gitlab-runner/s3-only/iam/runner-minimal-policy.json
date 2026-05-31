@@ -1,0 +1,41 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "RunnerS3TriggerAndStatusOnly",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:GetObject",
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::trigger-bucket",
+        "arn:aws:s3:::trigger-bucket/*",
+        "arn:aws:s3:::status-bucket",
+        "arn:aws:s3:::status-bucket/*"
+      ]
+    },
+    {
+      "Sid": "RunnerKmsForSseKmsOnly",
+      "Effect": "Allow",
+      "Action": [
+        "kms:Decrypt",
+        "kms:GenerateDataKey"
+      ],
+      "Resource": "arn:aws:kms:REGION:RUNNER-ACCOUNT:key/KEY-ID"
+    },
+    {
+      "Sid": "OptionalReadToolchainMirror",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::MIRROR",
+        "arn:aws:s3:::MIRROR/*"
+      ]
+    }
+  ]
+}
