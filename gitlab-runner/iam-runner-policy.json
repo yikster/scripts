@@ -1,0 +1,170 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CodeArtifactAuthToken",
+      "Effect": "Allow",
+      "Action": [
+        "codeartifact:GetAuthorizationToken"
+      ],
+      "Resource": [
+        "arn:aws:codeartifact:ap-northeast-2:999999999999:domain/my-domain"
+      ]
+    },
+    {
+      "Sid": "CodeArtifactRepoAccess",
+      "Effect": "Allow",
+      "Action": [
+        "codeartifact:GetRepositoryEndpoint",
+        "codeartifact:ReadFromRepository"
+      ],
+      "Resource": [
+        "arn:aws:codeartifact:ap-northeast-2:999999999999:repository/my-domain/npm-store",
+        "arn:aws:codeartifact:ap-northeast-2:999999999999:repository/my-domain/pypi-store"
+      ]
+    },
+    {
+      "Sid": "CodeArtifactPackageAssets",
+      "Effect": "Allow",
+      "Action": [
+        "codeartifact:GetPackageVersionAsset",
+        "codeartifact:GetPackageVersionReadme",
+        "codeartifact:DescribePackageVersion",
+        "codeartifact:ListPackageVersions",
+        "codeartifact:ListPackages",
+        "codeartifact:ReadFromRepository"
+      ],
+      "Resource": [
+        "arn:aws:codeartifact:ap-northeast-2:999999999999:package/my-domain/npm-store/*",
+        "arn:aws:codeartifact:ap-northeast-2:999999999999:package/my-domain/pypi-store/*"
+      ]
+    },
+    {
+      "Sid": "STSServiceBearerTokenForCodeArtifact",
+      "Effect": "Allow",
+      "Action": "sts:GetServiceBearerToken",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "sts:AWSServiceName": "codeartifact.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "AssumeCDKBootstrapRolesModelA",
+      "Effect": "Allow",
+      "Action": "sts:AssumeRole",
+      "Resource": [
+        "arn:aws:iam::111111111111:role/cdk-hnb659fds-*-role-111111111111-*",
+        "arn:aws:iam::222222222222:role/cdk-hnb659fds-*-role-222222222222-*",
+        "arn:aws:iam::333333333333:role/cdk-hnb659fds-*-role-333333333333-*"
+      ]
+    },
+    {
+      "Sid": "AssumeOrgDeployRolesModelB",
+      "Effect": "Allow",
+      "Action": "sts:AssumeRole",
+      "Resource": [
+        "arn:aws:iam::111111111111:role/OrgDeployRole",
+        "arn:aws:iam::222222222222:role/OrgDeployRole",
+        "arn:aws:iam::333333333333:role/OrgDeployRole"
+      ]
+    },
+    {
+      "Sid": "CodeBuildSameAccountOnly",
+      "Effect": "Allow",
+      "Action": [
+        "codebuild:StartBuild",
+        "codebuild:BatchGetBuilds",
+        "codebuild:BatchGetReports"
+      ],
+      "Resource": [
+        "arn:aws:codebuild:ap-northeast-2:999999999999:project/*"
+      ]
+    },
+    {
+      "Sid": "CloudFormationForCdkInRunnerAccount",
+      "Effect": "Allow",
+      "Action": [
+        "cloudformation:DescribeStacks",
+        "cloudformation:DescribeStackEvents",
+        "cloudformation:GetTemplate",
+        "cloudformation:ListStacks"
+      ],
+      "Resource": [
+        "arn:aws:cloudformation:ap-northeast-2:999999999999:stack/*/*"
+      ]
+    },
+    {
+      "Sid": "Ec2DescribeForSameAccountCdkLookups",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeAvailabilityZones",
+        "ec2:DescribeVpcs",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeRouteTables"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "SessionManagerAgent",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:UpdateInstanceInformation",
+        "ssmmessages:CreateControlChannel",
+        "ssmmessages:CreateDataChannel",
+        "ssmmessages:OpenControlChannel",
+        "ssmmessages:OpenDataChannel",
+        "ec2messages:AcknowledgeMessage",
+        "ec2messages:DeleteMessage",
+        "ec2messages:FailMessage",
+        "ec2messages:GetEndpoint",
+        "ec2messages:GetMessages",
+        "ec2messages:SendReply"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "SsmParameterReadOptional",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:GetParameter",
+        "ssm:GetParameters",
+        "ssm:GetParametersByPath"
+      ],
+      "Resource": [
+        "arn:aws:ssm:ap-northeast-2:999999999999:parameter/cdk-bootstrap/*",
+        "arn:aws:ssm:ap-northeast-2:999999999999:parameter/gitlab-runner/*"
+      ]
+    },
+    {
+      "Sid": "CloudWatchLogsWrite",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:DescribeLogStreams",
+        "logs:DescribeLogGroups"
+      ],
+      "Resource": [
+        "arn:aws:logs:ap-northeast-2:999999999999:log-group:*"
+      ]
+    },
+    {
+      "Sid": "S3RunnerCacheOptional",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::gitlab-runner-cache-999999999999",
+        "arn:aws:s3:::gitlab-runner-cache-999999999999/*"
+      ]
+    }
+  ]
+}

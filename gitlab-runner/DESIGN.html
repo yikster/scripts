@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GitLab Runner on AL2023 — Design &amp; Implementation Plan</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#9da7b3; --line:#30363d;
+    --accent:#1f6feb; --accent2:#2ea043; --warn:#d29922; --danger:#f85149;
+    --code-bg:#0b1020; --chip:#21262d;
+    --max:1180px;
+  }
+  @media (prefers-color-scheme: light){
+    :root{ --bg:#ffffff; --panel:#f6f8fa; --ink:#1f2328; --muted:#59636e; --line:#d1d9e0;
+           --accent:#0969da; --accent2:#1a7f37; --warn:#9a6700; --danger:#cf222e;
+           --code-bg:#f6f8fa; --chip:#eaeef2; }
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,"Apple SD Gothic Neo","Noto Sans KR",sans-serif;}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:var(--max);margin:0 auto;padding:0 24px}
+  header.hero{border-bottom:1px solid var(--line);background:
+    radial-gradient(1200px 300px at 20% -50%, rgba(31,111,235,.18), transparent 60%);}
+  header.hero .wrap{padding:40px 24px 28px}
+  .kicker{color:var(--accent);font-weight:700;letter-spacing:.06em;text-transform:uppercase;font-size:12px;margin:0 0 8px}
+  h1{font-size:30px;line-height:1.2;margin:0 0 8px}
+  .sub{color:var(--muted);font-size:16px;margin:0 0 18px}
+  .meta{display:flex;flex-wrap:wrap;gap:8px}
+  .chip{background:var(--chip);border:1px solid var(--line);border-radius:999px;padding:4px 12px;font-size:13px;color:var(--muted)}
+  .chip b{color:var(--ink);font-weight:600}
+  .layout{display:grid;grid-template-columns:260px 1fr;gap:36px;align-items:start;padding:32px 0 80px}
+  nav.toc{position:sticky;top:18px;max-height:calc(100vh - 36px);overflow:auto;
+    border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:14px}
+  nav.toc h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:4px 6px 10px}
+  nav.toc ol{list-style:none;margin:0;padding:0;counter-reset:c}
+  nav.toc li{counter-increment:c;margin:1px 0}
+  nav.toc a{display:block;padding:5px 8px;border-radius:7px;color:var(--ink);font-size:13.5px}
+  nav.toc a::before{content:counter(c) ". ";color:var(--muted)}
+  nav.toc a:hover{background:var(--chip);text-decoration:none}
+  main{min-width:0}
+  section{scroll-margin-top:18px;margin:0 0 34px}
+  h2.sec{font-size:22px;margin:0 0 14px;padding-bottom:8px;border-bottom:1px solid var(--line)}
+  h2.sec .n{color:var(--accent);font-weight:800;margin-right:10px}
+  h3{font-size:17px;margin:22px 0 8px}
+  p{margin:10px 0}
+  ul,ol{padding-left:22px}
+  li{margin:5px 0}
+  code{background:var(--code-bg);border:1px solid var(--line);border-radius:5px;padding:1px 6px;font-size:13px;
+    font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace}
+  pre{background:var(--code-bg);border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow:auto;font-size:12.5px;line-height:1.55}
+  pre code{background:none;border:0;padding:0}
+  table{border-collapse:collapse;width:100%;margin:14px 0;font-size:14px;display:block;overflow:auto}
+  th,td{border:1px solid var(--line);padding:8px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel);font-weight:600}
+  tr:nth-child(even) td{background:rgba(127,127,127,.05)}
+  .callout{border:1px solid var(--line);border-left-width:4px;border-radius:8px;padding:12px 16px;margin:14px 0;background:var(--panel)}
+  .callout.warn{border-left-color:var(--warn)}
+  .callout.danger{border-left-color:var(--danger)}
+  .callout.ok{border-left-color:var(--accent2)}
+  .callout.info{border-left-color:var(--accent)}
+  .callout .lbl{font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px}
+  .callout.warn .lbl{color:var(--warn)} .callout.danger .lbl{color:var(--danger)}
+  .callout.ok .lbl{color:var(--accent2)} .callout.info .lbl{color:var(--accent)}
+  .tag{display:inline-block;font-size:11px;font-weight:700;border-radius:5px;padding:1px 7px;vertical-align:middle}
+  .m{background:rgba(248,81,73,.16);color:var(--danger);border:1px solid rgba(248,81,73,.4)}
+  .o{background:rgba(46,160,67,.16);color:var(--accent2);border:1px solid rgba(46,160,67,.4)}
+  .diagram{background:var(--code-bg);border:1px solid var(--line);border-radius:10px;padding:14px;overflow:auto}
+  .diagram pre{border:0;background:none;padding:0;font-size:11.5px;line-height:1.4}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .card{border:1px solid var(--line);border-radius:10px;padding:14px 16px;background:var(--panel)}
+  .card h3{margin-top:0}
+  footer{border-top:1px solid var(--line);color:var(--muted);font-size:13px;padding:22px 0 60px}
+  .legend{font-size:13px;color:var(--muted);margin:6px 0 14px}
+  @media (max-width:900px){
+    .layout{grid-template-columns:1fr}
+    nav.toc{position:static;max-height:none}
+    .grid2{grid-template-columns:1fr}
+  }
+  @media print{
+    nav.toc{display:none}
+    .layout{grid-template-columns:1fr;padding:0}
+    body{background:#fff;color:#000}
+    header.hero{background:none}
+    a{color:#000}
+    pre,table,.callout,.diagram{break-inside:avoid}
+  }
+</style>
+</head>
+<body>
+<header class="hero">
+  <div class="wrap">
+    <p class="kicker">Design &amp; Implementation Plan</p>
+    <h1>GitLab Runner on Amazon Linux 2023</h1>
+    <p class="sub">Private subnet · multi-runtime (Node + Python) · cross-account AWS CDK &amp; CodeBuild</p>
+    <div class="meta">
+      <span class="chip"><b>Status:</b> Draft for review</span>
+      <span class="chip"><b>Owner:</b> Platform / DevOps</span>
+      <span class="chip"><b>Date:</b> 2026-05-31</span>
+      <span class="chip"><b>Executor:</b> shell + mise + host Docker</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+<div class="layout">
+
+<nav class="toc">
+  <h2>Contents</h2>
+  <ol>
+    <li><a href="#s1">Problem &amp; constraints</a></li>
+    <li><a href="#s2">Goals and non-goals</a></li>
+    <li><a href="#s3">Architecture overview</a></li>
+    <li><a href="#s4">Decision — executor</a></li>
+    <li><a href="#s5">Network (VPC endpoints)</a></li>
+    <li><a href="#s6">IAM design</a></li>
+    <li><a href="#s7">Runtime management</a></li>
+    <li><a href="#s8">Packaging (CodeArtifact)</a></li>
+    <li><a href="#s9">Runner configuration</a></li>
+    <li><a href="#s10">Cross-account CDK / CodeBuild</a></li>
+    <li><a href="#s11">Golden AMI</a></li>
+    <li><a href="#s12">Required-features checklist</a></li>
+    <li><a href="#s13">Open decisions</a></li>
+    <li><a href="#s14">Implementation plan</a></li>
+    <li><a href="#s15">File inventory</a></li>
+    <li><a href="#s16">Validation &amp; testing</a></li>
+    <li><a href="#s17">Risks &amp; known limits</a></li>
+    <li><a href="#s18">Appendix — variables</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<section id="s1">
+  <h2 class="sec"><span class="n">1</span>Problem statement &amp; constraints</h2>
+  <p>We need a GitLab CI runner that builds and deploys infrastructure (<b>AWS CDK in both TypeScript
+  and Python</b>) and triggers <b>CodeBuild</b> projects in <b>multiple other AWS accounts</b>. The runner
+  host is an <b>EC2 instance on Amazon Linux 2023</b> in a <b>private subnet owned by the security team</b>.</p>
+  <table>
+    <thead><tr><th>#</th><th>Constraint (given)</th><th>Consequence</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>Runner runs on EC2 in a <b>private subnet</b></td><td>No public IP, no inbound from internet</td></tr>
+      <tr><td>2</td><td>Security-team controlled; <b>no public routing</b></td><td>No IGW route; assume no NAT egress — air-gapped except via PrivateLink + AWS-managed services</td></tr>
+      <tr><td>3</td><td><b>CodeArtifact</b> may be attached</td><td>Use as npm + pip/PyPI proxy (upstream fetch is AWS-side)</td></tr>
+      <tr><td>4</td><td><b>An IAM Role</b> may be attached</td><td>Instance profile is the identity</td></tr>
+      <tr><td>5</td><td><b>No new IAM Users</b></td><td>All auth chains from the instance role; no static keys</td></tr>
+      <tr><td>6</td><td>The role <b>may be updated</b></td><td>We can grant exactly what is needed</td></tr>
+      <tr><td>7</td><td>Must run <b>CDK (TS + Python)</b> for CI</td><td>Multiple Node + Python versions on-host</td></tr>
+    </tbody>
+  </table>
+  <div class="callout info"><div class="lbl">Derived requirement</div>
+  Every outbound call — AWS API, package download, runner→GitLab — must traverse a <b>VPC endpoint</b>
+  or an <b>AWS-managed service</b>, or it fails.</div>
+</section>
+
+<section id="s2">
+  <h2 class="sec"><span class="n">2</span>Goals and non-goals</h2>
+  <div class="grid2">
+    <div class="card"><h3>Goals</h3>
+      <ul>
+        <li>Multiple <b>Node</b> (18/20/22) and <b>Python</b> (3.10/3.11/3.12) per job.</li>
+        <li><code>cdk deploy</code> (TS + Python) and <b>CodeBuild triggers</b> into multiple accounts.</li>
+        <li><b>No internet egress</b> — packages via CodeArtifact, AWS APIs via VPC endpoints.</li>
+        <li><b>Instance role only</b> — no IAM users, no static credentials.</li>
+        <li>Idempotent, reproducible (golden AMI), SSH-less (SSM Session Manager).</li>
+      </ul>
+    </div>
+    <div class="card"><h3>Non-goals</h3>
+      <ul>
+        <li>Building the VPC endpoints (network team owns IaC — we specify the list).</li>
+        <li>Hosting GitLab (we only consume it — see the reachability decision).</li>
+        <li>Autoscaling runner fleets (single-host design; templatable later).</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="s3">
+  <h2 class="sec"><span class="n">3</span>Architecture overview</h2>
+  <div class="diagram"><pre>
+                    ┌──────────────── Build account (HAS egress) ────────────────┐
+                    │  EC2 + internet → mise, Node 18/20/22, Python 3.10/3.11/3.12 │
+                    │  + AWS CLI v2 + Docker + gitlab-runner ─► GOLDEN AMI (no token)│
+                    └───────────────────────────┬─────────────────────────────────┘
+                                                 │ AMI copy/share
+                                                 ▼
+┌──────────────── Runner account 9999… (private subnet, NO internet) ─────────────────┐
+│  EC2 (AL2023) ─ instance profile RunnerRole ─ IMDSv2 only ─ SSM Session Manager      │
+│    mise → node@{18,20,22}/python@{3.10,3.11,3.12}   Docker daemon (CDK bundling)     │
+│    gitlab-runner (shell executor) ─ config.toml environment[] injects PATH/shims     │
+│    job before_script: codeartifact-login.sh → npm/pip/uv  (12h token refresh)        │
+│    └── all egress ONLY via VPC endpoints ──────────────────────────────────┐        │
+│  endpoints: S3(GW)·sts(regional)·cloudformation·codeartifact.api/.repos·    ▼        │
+│             ecr.api/.dkr·logs·kms·ssm/ssmmessages/ec2messages·codebuild              │
+│  CodeArtifact domain ──upstream──► public:npmjs / public:pypi (fetch AWS-side)       │
+└───────────────────────────────┬─────────────────────────────────────────────────────┘
+                                 │ sts:AssumeRole (regional) + cdk deploy / StartBuild
+                                 ▼
+   ┌──── Target 111… ────┐  ┌── 222… ──┐  ┌── 333… ──┐
+   │ cdk-hnb659fds-* (A) │  │OrgDeploy │  │OrgDeploy │   CloudFormation · S3 assets ·
+   │ or OrgDeployRole(B) │  │  Role    │  │  Role    │   ECR · CodeBuild (assume→Start)
+   └─────────────────────┘  └──────────┘  └──────────┘
+        ▲ GitLab reachability (DECIDE FIRST): in-VPC GitLab OR approved proxy
+        └ (GitLab.com SaaS has no PrivateLink)
+  </pre></div>
+  <p><b>End-to-end flow:</b> boot from golden AMI → <code>mise</code> exposes runtimes to the non-login job
+  shell via <code>config.toml environment[]</code> → runner registers with a <code>glrt-*</code> token → each job
+  refreshes the CodeArtifact token and points npm/pip/uv at it → job assumes the target-account role over
+  the regional STS endpoint → <code>cdk bootstrap/deploy</code> or cross-account CodeBuild, all through endpoints.</p>
+</section>
+
+<section id="s4">
+  <h2 class="sec"><span class="n">4</span>Key decision — executor model</h2>
+  <div class="callout ok"><div class="lbl">Primary recommendation</div>
+  <b>Shell executor + <code>mise</code> + a host Docker daemon.</b> In an internet-isolated subnet it pulls the
+  <b>fewest images</b>, needs <b>no per-job ECR fetch</b>, and gives CDK direct <code>docker.sock</code> access
+  for asset bundling. <code>mise</code> supplies all Node/Python versions natively.</div>
+  <p><b>Alternative:</b> Docker executor + a single pre-baked ECR image (all runtimes + CDK) — only when a
+  team needs strong per-job isolation or high concurrency.</p>
+  <table>
+    <thead><tr><th>Criterion</th><th>Shell + mise + host Docker (chosen)</th><th>Docker executor + ECR image</th></tr></thead>
+    <tbody>
+      <tr><td>Image pulls in air-gap</td><td>None (runtimes on host)</td><td>One per job (ECR via endpoint)</td></tr>
+      <tr><td>CDK docker bundling</td><td>Direct <code>docker.sock</code></td><td>DinD or socket bind</td></tr>
+      <tr><td>Multi Node/Python</td><td><code>mise use</code> per job</td><td>Baked into the image</td></tr>
+      <tr><td>Per-job isolation</td><td>Weaker (shared host)</td><td>Strong</td></tr>
+      <tr><td>Operational overhead</td><td>Low</td><td>ECR image build/scan/lifecycle</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section id="s5">
+  <h2 class="sec"><span class="n">5</span>Network design (VPC endpoints)</h2>
+  <p>The network/security team provisions these on the private subnet.</p>
+  <div class="callout warn"><div class="lbl">Private DNS must be ENABLED</div>
+  on every interface endpoint, or <code>service.&lt;region&gt;.amazonaws.com</code> and the CodeArtifact
+  <code>get-repository-endpoint</code> hostnames will not resolve in-VPC.</div>
+  <h3>Gateway endpoint (route-table association)</h3>
+  <table>
+    <thead><tr><th>Service</th><th>Type</th><th>Why mandatory</th></tr></thead>
+    <tbody><tr><td><code>com.amazonaws.&lt;region&gt;.s3</code></td><td>Gateway</td>
+      <td>CDK assets/bootstrap buckets, ECR layers, runner cache, <b>and CodeArtifact package payloads</b>
+      (served from an AWS-owned S3 bucket). Not just a cache nicety.</td></tr></tbody>
+  </table>
+  <h3>Interface endpoints (Private DNS = ENABLED)</h3>
+  <table>
+    <thead><tr><th>Service</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td><code>.sts</code></td><td><b>Regional</b> STS for cross-account <code>AssumeRole</code>. <b>Not</b> global <code>sts.amazonaws.com</code> (no endpoint → hangs). Pin <code>AWS_STS_REGIONAL_ENDPOINTS=regional</code>.</td></tr>
+      <tr><td><code>.cloudformation</code></td><td>CDK deploy</td></tr>
+      <tr><td><code>.codeartifact.api</code></td><td>Token / endpoint discovery</td></tr>
+      <tr><td><code>.codeartifact.repositories</code></td><td>Package download</td></tr>
+      <tr><td><code>.ecr.api</code> + <code>.ecr.dkr</code></td><td>CDK image assets, docker pull/push</td></tr>
+      <tr><td><code>.logs</code></td><td>CloudWatch Logs</td></tr>
+      <tr><td><code>.kms</code></td><td>Bootstrap-bucket / asset encryption</td></tr>
+      <tr><td><code>.ssm</code> + <code>.ssmmessages</code> + <code>.ec2messages</code></td><td>Session Manager (only shell access; no SSH/bastion)</td></tr>
+      <tr><td><code>.codebuild</code></td><td>Trigger CodeBuild</td></tr>
+    </tbody>
+  </table>
+  <p class="legend"><b>Optional:</b> <code>secretsmanager</code>, <code>ec2</code>, <code>dynamodb</code> (Gateway).
+  <b>Security groups:</b> endpoint SG inbound TCP 443 from subnet CIDR; runner SG egress 443 to it.</p>
+  <div class="callout info"><div class="lbl">IMDS note</div>
+  IMDSv2 (<code>169.254.169.254</code>) is link-local and needs no endpoint, so the instance profile resolves
+  locally — but every <code>sts:AssumeRole</code> still needs the STS interface endpoint.</div>
+</section>
+
+<section id="s6">
+  <h2 class="sec"><span class="n">6</span>IAM design</h2>
+  <p>The <b>instance profile (<code>RunnerRole</code>) is the sole identity</b> — no IAM users, no static keys.</p>
+  <h3>RunnerRole permission policy (<code>iam-runner-policy.json</code>)</h3>
+  <ul>
+    <li><b>CodeArtifact read</b> — <code>GetAuthorizationToken</code> (domain), <code>GetRepositoryEndpoint</code>+<code>ReadFromRepository</code> (repos), package read actions (package ARNs).</li>
+    <li><b><code>sts:GetServiceBearerToken</code></b> — <code>Resource: "*"</code> (cannot be scoped) + condition <code>sts:AWSServiceName = codeartifact.amazonaws.com</code>.
+      <span class="tag m">easy to forget</span> CodeArtifact auth fails without it.</li>
+    <li><b>Cross-account <code>sts:AssumeRole</code></b> — Model A <code>cdk-hnb659fds-*-role-&lt;acct&gt;-*</code> and/or Model B <code>OrgDeployRole</code>.</li>
+    <li><b>Same-account CodeBuild</b> only (cross-account StartBuild is on the assumed target role — see §10).</li>
+    <li><b>Session Manager</b>, <b>CloudWatch Logs</b>, same-account CloudFormation + EC2 describe, optional SSM Parameter read + S3 cache.</li>
+  </ul>
+  <p><b>Target-account trust</b> (<code>orgdeployrole-trust.json</code>, Model B) trusts <code>RunnerRole</code> with an
+  <code>sts:ExternalId</code> condition; remove it if unused.</p>
+</section>
+
+<section id="s7">
+  <h2 class="sec"><span class="n">7</span>Runtime management (multiple Node + Python)</h2>
+  <p>Tool: <b><code>mise</code></b> — one binary for both Node and Python, fast, per-repo <code>.mise.toml</code>/<code>.tool-versions</code>.
+  Shared at <code>/usr/local/share/mise</code> + <code>/etc/mise</code>; versions <b>Node 18/20/22</b> and <b>Python 3.10/3.11/3.12</b>
+  (Python via <b>python-build-standalone</b>, no on-host compiler).</p>
+  <div class="callout warn"><div class="lbl">The critical detail</div>
+  The shell executor runs a <b>non-login</b> bash, which does <b>not</b> source <code>/etc/profile.d/*.sh</code>.
+  Runtimes are injected via <code>config.toml environment[]</code>:</div>
+  <pre><code>BASH_ENV=/etc/profile.d/mise-shims.sh
+MISE_DATA_DIR=/usr/local/share/mise
+MISE_CONFIG_DIR=/etc/mise
+PATH=&lt;shims first&gt;:...
+AWS_STS_REGIONAL_ENDPOINTS=regional</code></pre>
+  <p><code>/etc/profile.d/mise.sh</code> is the human-login (SSM) path; <code>mise-shims.sh</code> is the machine path the
+  runner uses. The bootstrap <b>verifies runtimes in the real non-login environment</b> so a green check can't lie.</p>
+  <div class="callout info"><div class="lbl">CDK CLI</div>
+  Install per-project via <code>npx</code> (pin <code>aws-cdk</code>/<code>aws-cdk-lib</code> in <code>package.json</code>) —
+  never a global <code>npm i -g aws-cdk</code> under multi-Node.</div>
+</section>
+
+<section id="s8">
+  <h2 class="sec"><span class="n">8</span>Packaging — CodeArtifact as npm/PyPI proxy</h2>
+  <p>The instance can't reach npmjs.org or pypi.org. CodeArtifact proxies both; its <b>public upstream</b>
+  fetch happens on the AWS service side, so it works with no instance egress.</p>
+  <ul>
+    <li>One domain with <code>npm-store</code> (upstream <code>public:npmjs</code>) and <code>pypi-store</code> (upstream <code>public:pypi</code>).</li>
+    <li><code>codeartifact-login.sh</code> refreshes the <b>12-hour</b> token; configures npm (<code>.npmrc</code>), pip (<code>pip.conf</code>, path ends <code>/simple/</code>), uv (named index), optionally poetry/twine.</li>
+    <li>Refresh in the CI <b><code>before_script</code></b> every job; a systemd timer is a commented backup.</li>
+  </ul>
+  <div class="callout danger"><div class="lbl">Secret hygiene</div>
+  The pip token lives only in <code>pip.conf</code> (chmod 600); <code>PIP_INDEX_URL</code> is deliberately <b>not</b>
+  exported. Never enable <code>CI_DEBUG_TRACE</code> / <code>set -x</code> in <code>before_script</code>.</div>
+</section>
+
+<section id="s9">
+  <h2 class="sec"><span class="n">9</span>GitLab Runner configuration</h2>
+  <ul>
+    <li><b>Install:</b> the <code>gitlab-runner</code> binary/RPM needs internet → bake into the golden AMI.</li>
+    <li><b>Register:</b> modern <b><code>glrt-*</code> authentication token</b> (legacy <code>registration-token</code> removed in GitLab 18.0). Idempotent on <code>RUNNER_NAME</code>+<code>GITLAB_URL</code>; prunes dead runners via <code>verify --delete</code>.</li>
+    <li><b><code>config.toml</code>:</b> <code>concurrent</code>, one <code>[[runners]]</code> with <code>executor=shell</code>, <code>shell=bash</code>, <code>builds_dir</code>/<code>cache_dir</code> under <code>/home/gitlab-runner</code>, and the <code>environment[]</code> runtime injection. Optional S3 cache with <code>ServerAddress=s3.&lt;region&gt;.amazonaws.com</code> (never global).</li>
+    <li><b>Service:</b> systemd, as the <code>gitlab-runner</code> user (in the <code>docker</code> group).</li>
+  </ul>
+</section>
+
+<section id="s10">
+  <h2 class="sec"><span class="n">10</span>Cross-account CDK &amp; CodeBuild</h2>
+  <div class="grid2">
+    <div class="card"><h3>Model A — recommended</h3>
+      <p><code>cdk bootstrap aws://&lt;target&gt;/&lt;region&gt; --trust &lt;runner-account&gt; --cloudformation-execution-policies &lt;policy&gt;</code>
+      in every target. CDK <b>auto-assumes</b> the target's <code>cdk-hnb659fds-*</code> deploy/publish/<b>lookup</b> roles.
+      <code>RunnerRole</code> only needs <code>sts:AssumeRole</code> on <code>cdk-hnb659fds-*</code>. Re-assumes per operation →
+      sidesteps the 1h STS chaining cap. No profiles needed.</p>
+    </div>
+    <div class="card"><h3>Model B</h3>
+      <p>A dedicated <code>OrgDeployRole</code> per target (trusts <code>RunnerRole</code>, optional <code>ExternalId</code>),
+      used via an <code>~/.aws/config</code> profile from <code>aws-crossaccount-config.sh</code> with
+      <code>credential_source = Ec2InstanceMetadata</code> + <code>role_arn</code> (no <code>source_profile</code>, no keys).</p>
+    </div>
+  </div>
+  <div class="callout warn"><div class="lbl">Cross-account CodeBuild</div>
+  Cannot be started directly by <code>RunnerRole</code>. The job <b>assumes the target role first</b>, then
+  <code>StartBuild</code> — so <code>codebuild:StartBuild</code> lives on the <b>target</b> <code>OrgDeployRole</code>. The sample
+  pipeline does this in a subshell with a unique <code>role-session-name</code> and a <b>bounded poll loop</b> (≤ ~60 min).</div>
+  <p class="legend">CDK context <b>lookups</b> at synth time also assume the target <code>lookup-role</code> — covered by the Model A wildcard ARNs.</p>
+</section>
+
+<section id="s11">
+  <h2 class="sec"><span class="n">11</span>Golden AMI strategy</h2>
+  <div class="callout danger"><div class="lbl">In-place install will fail</div>
+  The bootstrap installers themselves need the internet (<code>mise.run</code>, python-build-standalone, runtime
+  tarballs, the <code>gitlab-runner</code> RPM). Build a golden AMI in an egress-enabled account.</div>
+  <ul>
+    <li>Build account: <code>sudo GOLDEN_AMI=false GITLAB_RUNNER_TOKEN= bash init-gitlab-runner-al2023.sh</code>
+      (empty token → bakes everything, does <b>not</b> register). Verify → snapshot (<b>Packer recommended</b>).</li>
+    <li><b>Never bake a runner token into the image.</b></li>
+    <li>Launch in the private subnet, attach <code>RunnerRole</code>, IMDSv2 (<code>HttpTokens=required</code>, hop limit 1),
+      no public IP/route. Register over SSM with <code>GOLDEN_AMI=true</code>.</li>
+  </ul>
+</section>
+
+<section id="s12">
+  <h2 class="sec"><span class="n">12</span>Required-features checklist</h2>
+  <p class="legend"><span class="tag m">M</span> mandatory &nbsp; <span class="tag o">O</span> optional</p>
+  <div class="grid2">
+    <div class="card"><h3>Networking — VPC endpoints</h3>
+      <ul>
+        <li><span class="tag m">M</span> S3 <b>Gateway</b> (assets + ECR layers + cache + CodeArtifact payloads)</li>
+        <li><span class="tag m">M</span> STS <b>regional</b> (+ <code>AWS_STS_REGIONAL_ENDPOINTS=regional</code>)</li>
+        <li><span class="tag m">M</span> cloudformation, codeartifact.api/.repositories</li>
+        <li><span class="tag m">M</span> ecr.api+ecr.dkr, logs, kms</li>
+        <li><span class="tag m">M</span> ssm+ssmmessages+ec2messages, codebuild</li>
+        <li><span class="tag m">M</span> SG 443 from subnet CIDR; Private DNS enabled</li>
+        <li><span class="tag o">O</span> secretsmanager, ec2, dynamodb(GW)</li>
+      </ul>
+    </div>
+    <div class="card"><h3>IAM</h3>
+      <ul>
+        <li><span class="tag m">M</span> RunnerRole instance profile (EC2 trust)</li>
+        <li><span class="tag m">M</span> CodeArtifact read (domain/repo/package ARNs)</li>
+        <li><span class="tag m">M</span> <code>sts:GetServiceBearerToken</code> (Resource *, CA condition)</li>
+        <li><span class="tag m">M</span> cross-account <code>sts:AssumeRole</code> (A and/or B)</li>
+        <li><span class="tag m">M</span> CodeBuild StartBuild on <b>target</b> OrgDeployRole</li>
+        <li><span class="tag m">M</span> Session Manager perms, Logs write, target trust policies</li>
+        <li><span class="tag o">O</span> S3 cache perms, KMS on bootstrap key</li>
+      </ul>
+    </div>
+    <div class="card"><h3>Runtimes &amp; packaging</h3>
+      <ul>
+        <li><span class="tag m">M</span> mise + Node 18/20/22 + Python 3.10/3.11/3.12 (golden AMI)</li>
+        <li><span class="tag m">M</span> CDK via <code>npx</code> (pinned), Docker on host, runner in <code>docker</code> group</li>
+        <li><span class="tag m">M</span> CodeArtifact domain + npm-store + pypi-store</li>
+        <li><span class="tag m">M</span> per-job 12h token refresh; npm/pip/uv config</li>
+      </ul>
+    </div>
+    <div class="card"><h3>Runner, cross-account &amp; mgmt</h3>
+      <ul>
+        <li><span class="tag m">M</span> shell executor; <code>environment[]</code> runtime injection</li>
+        <li><span class="tag m">M</span> <code>glrt-*</code> registration; systemd service</li>
+        <li><span class="tag m">M</span> CDK bootstrap runner + every target acct/region</li>
+        <li><span class="tag m">M</span> <code>--require-approval never</code>; profiles or <code>--trust</code></li>
+        <li><span class="tag m">M</span> IMDSv2; SSM; Logs; <b>GitLab egress resolved</b></li>
+        <li><span class="tag o">O</span> S3 cache; Docker-executor alternative; cross-account CodeBuild</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="s13">
+  <h2 class="sec"><span class="n">13</span>Open decisions</h2>
+  <div class="callout danger"><div class="lbl">Hard blocker — decide first</div>
+  <b>GitLab server reachability.</b> Self-managed in-VPC GitLab (PrivateLink/peering/route) vs GitLab.com SaaS.
+  <b>GitLab.com has no AWS PrivateLink</b> — the runner cannot register/fetch jobs without a security-approved
+  in-VPC proxy or NAT exception. Nothing else works until this is settled.</div>
+  <ol start="2">
+    <li><b>Golden AMI vs in-place bootstrap</b> — in-place will fail; decide AMI build/versioning ownership (Packer).</li>
+    <li><b>CDK trust model A vs B</b> — A simplest + long-deploy safe; B explicit control + ExternalId.</li>
+    <li><b>Executor</b> — shell (recommended) vs Docker + ECR image.</li>
+    <li><b>CDK in-runner vs CodeBuild trigger</b> — changes which endpoints/IAM are mandatory.</li>
+    <li><b>Runner cache backend</b> — S3 distributed vs local-only.</li>
+    <li><b>Target account × region matrix</b> — pin to scope ARNs/bootstrap.</li>
+    <li><b>ExternalId usage</b> — set consistently across trust/profile/codebuild, or remove.</li>
+    <li><b>Secrets source</b> — Secrets Manager (needs endpoint) vs SSM Parameter Store (covered).</li>
+    <li><b>Long-job limits</b> — STS chaining 1h; CodeArtifact token 12h.</li>
+  </ol>
+</section>
+
+<section id="s14">
+  <h2 class="sec"><span class="n">14</span>Implementation plan (phased)</h2>
+  <table>
+    <thead><tr><th>Phase</th><th>Owner</th><th>Actions</th></tr></thead>
+    <tbody>
+      <tr><td><b>0. Decisions</b></td><td>All</td><td>Resolve GitLab reachability; choose trust model + executor; confirm account×region matrix.</td></tr>
+      <tr><td><b>1. Network</b></td><td>Security/Network</td><td>Create all VPC endpoints (§5), Private DNS on; SG 443 from subnet CIDR; verify DNS from a subnet host.</td></tr>
+      <tr><td><b>2. CodeArtifact</b></td><td>Platform</td><td>Domain + <code>npm-store</code> (public:npmjs) + <code>pypi-store</code> (public:pypi).</td></tr>
+      <tr><td><b>3. IAM</b></td><td>Platform</td><td>Create <code>RunnerRole</code> + attach <code>iam-runner-policy.json</code> (substitute IDs/region; drop unused A/B block); instance profile.</td></tr>
+      <tr><td><b>4. Targets</b></td><td>Platform</td><td>Model A: <code>cdk bootstrap … --trust &lt;runner&gt;</code> per acct/region. Model B: <code>OrgDeployRole</code> + cross-account CodeBuild grant.</td></tr>
+      <tr><td><b>5. Golden AMI</b></td><td>Platform (build acct)</td><td><code>GOLDEN_AMI=false GITLAB_RUNNER_TOKEN= bash init-…sh</code> → verify → snapshot (Packer). No token baked.</td></tr>
+      <tr><td><b>6. Launch &amp; register</b></td><td>Platform</td><td>Launch in subnet, attach role, IMDSv2; over SSM: <code>GOLDEN_AMI=true GITLAB_URL=… GITLAB_RUNNER_TOKEN=glrt-… bash init-…sh</code>.</td></tr>
+      <tr><td><b>7. Config &amp; helper</b></td><td>Platform</td><td>Model B: <code>aws-crossaccount-config.sh</code>. Install <code>codeartifact-login.sh</code> to <code>/usr/local/bin</code> (+ optional timer).</td></tr>
+      <tr><td><b>8. Wire &amp; validate</b></td><td>App teams</td><td>Drop <code>sample.gitlab-ci.yml</code> as <code>.gitlab-ci.yml</code>; pin CDK; run runtime-matrix, build, diff, deploy (TS+Py), codebuild trigger.</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section id="s15">
+  <h2 class="sec"><span class="n">15</span>File inventory</h2>
+  <table>
+    <thead><tr><th>File</th><th>Type</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td><code>init-gitlab-runner-al2023.sh</code></td><td>bash</td><td>Master EC2 bootstrap (golden-AMI aware); Docker/AWS CLI v2/mise + runtimes; register + tune runner; runtime verification</td></tr>
+      <tr><td><code>codeartifact-login.sh</code></td><td>bash</td><td>12h token refresh; npm/pip/uv (+poetry/twine); dual direct/sourced mode</td></tr>
+      <tr><td><code>aws-crossaccount-config.sh</code></td><td>bash</td><td>Generates <code>~/.aws/config</code> profiles (Ec2InstanceMetadata + role_arn); optional ExternalId</td></tr>
+      <tr><td><code>iam-runner-policy.json</code></td><td>json</td><td>RunnerRole permission policy</td></tr>
+      <tr><td><code>orgdeployrole-trust.json</code></td><td>json</td><td>Target-account OrgDeployRole trust (Model B)</td></tr>
+      <tr><td><code>sample.gitlab-ci.yml</code></td><td>yaml</td><td>Reference pipeline (multi-runtime + cross-account CDK + CodeBuild)</td></tr>
+      <tr><td><code>README.md</code></td><td>md</td><td>Operator quick reference</td></tr>
+      <tr><td><code>DESIGN.md</code> / <code>DESIGN.html</code></td><td>doc</td><td>This document</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section id="s16">
+  <h2 class="sec"><span class="n">16</span>Validation &amp; testing</h2>
+  <p><b>Static (done locally):</b> <code>bash -n</code> on all scripts; JSON parses; <code>sample.gitlab-ci.yml</code>
+  validated with a real YAML parser (Ruby Psych) + an AST duplicate-key / tab / CRLF / type-coercion trap scan —
+  clean. The scanner was verified against a deliberately-broken control file (it fired correctly).</p>
+  <p><b>Semantic (run on your side — needs network):</b></p>
+  <pre><code># GitLab CI Lint API
+JSON=$(jq -Rs . &lt; gitlab-runner/sample.gitlab-ci.yml)
+curl -s -H "PRIVATE-TOKEN: &lt;token&gt;" -H "Content-Type: application/json" \
+  --data "{\"content\": $JSON}" "https://&lt;gitlab-host&gt;/api/v4/ci/lint" | jq .
+# or Pipeline Editor → Validate, or:  npx gitlab-ci-local --file gitlab-runner/sample.gitlab-ci.yml --list</code></pre>
+  <p><b>End-to-end gates:</b> runtime matrix switches versions; <code>npm ci</code> resolves via CodeArtifact;
+  <code>cdk diff</code> does a cross-account lookup; <code>cdk deploy</code> (TS + Python) succeeds; CodeBuild trigger
+  assumes the target role and reaches <code>SUCCEEDED</code>.</p>
+</section>
+
+<section id="s17">
+  <h2 class="sec"><span class="n">17</span>Risks &amp; known limits</h2>
+  <ul>
+    <li><b>Chained STS sessions hard-cap at 1h</b> regardless of <code>MaxSessionDuration</code> → prefer Model A per-op re-assume for long deploys; CodeBuild poll bounded under 1h.</li>
+    <li><b>CodeArtifact token TTL 12h</b> → re-source <code>codeartifact-login.sh</code> mid-job for very long jobs.</li>
+    <li><b>Token leakage</b> → never enable <code>CI_DEBUG_TRACE</code>/<code>set -x</code> in <code>before_script</code>.</li>
+    <li><b>uv named index</b> requires the consuming <code>pyproject.toml</code> to declare an index of the same name.</li>
+    <li><b>Single-runner design</b> — the <code>config.toml</code> patcher targets one named <code>[[runners]]</code> block.</li>
+    <li><b>GitLab.com SaaS</b> is a hard blocker without an approved proxy/NAT exception.</li>
+  </ul>
+</section>
+
+<section id="s18">
+  <h2 class="sec"><span class="n">18</span>Appendix — variable reference</h2>
+  <p>Keep these identical across all files when substituting:</p>
+  <table>
+    <thead><tr><th>Variable</th><th>Default</th></tr></thead>
+    <tbody>
+      <tr><td><code>AWS_REGION</code></td><td><code>ap-northeast-2</code></td></tr>
+      <tr><td>Runner / CodeArtifact-owner account</td><td><code>999999999999</code></td></tr>
+      <tr><td><code>CA_DOMAIN</code></td><td><code>my-domain</code></td></tr>
+      <tr><td><code>CA_NPM_REPO</code> / <code>CA_PYPI_REPO</code></td><td><code>npm-store</code> / <code>pypi-store</code></td></tr>
+      <tr><td>Target accounts</td><td><code>111111111111</code> / <code>222222222222</code> / <code>333333333333</code></td></tr>
+      <tr><td>CDK qualifier</td><td><code>hnb659fds</code></td></tr>
+      <tr><td>Runner tags</td><td><code>shell,cdk</code> (<code>,aws-private</code>)</td></tr>
+      <tr><td>mise dirs</td><td><code>/usr/local/share/mise</code> + <code>/etc/mise</code></td></tr>
+      <tr><td>Runtime injection</td><td><code>config.toml environment[] BASH_ENV=/etc/profile.d/mise-shims.sh</code></td></tr>
+    </tbody>
+  </table>
+  <p class="legend"><b>VPC endpoint service names (replace <code>&lt;region&gt;</code>):</b> Gateway →
+  <code>com.amazonaws.&lt;region&gt;.s3</code> (+<code>.dynamodb</code> if used). Interface (Private DNS enabled) →
+  <code>.sts</code>, <code>.cloudformation</code>, <code>.codeartifact.api</code>, <code>.codeartifact.repositories</code>,
+  <code>.ecr.api</code>, <code>.ecr.dkr</code>, <code>.logs</code>, <code>.kms</code>, <code>.ssm</code>, <code>.ssmmessages</code>,
+  <code>.ec2messages</code>, <code>.codebuild</code>. Optional → <code>.secretsmanager</code>, <code>.ec2</code>.</p>
+</section>
+
+</main>
+</div>
+
+<footer>
+  <div>GitLab Runner on Amazon Linux 2023 — Design &amp; Implementation Plan · Draft 2026-05-31 ·
+  Primary executor: shell + mise + host Docker · Single source of truth: <code>DESIGN.md</code>.</div>
+</footer>
+</div>
+</body>
+</html>
