@@ -1,56 +1,56 @@
 # =============================================================================
 # sample.gitlab-ci.yml
 # -----------------------------------------------------------------------------
-# 프라이빗 서브넷(인터넷 차단) 셸 executor 러너용 참조 파이프라인.
+# Reference pipeline for a private-subnet (internet-blocked) shell-executor runner.
 #
-# 핵심 전제(중요):
-#   - 러너는 비-로그인(non-login) bash 로 잡을 실행한다. 런타임(node/python/mise
-#     shims)은 config.toml environment[] (BASH_ENV/MISE_DATA_DIR/PATH) 로 이미 주입돼
-#     있다. 아래 before_script 의 mise activate 는 *이중 안전망*일 뿐, 주 경로는
-#     config.toml 이다.
-#   - codeartifact-login.sh 는 AMI 고정 경로(/usr/local/bin/codeartifact-login.sh)에
-#     설치돼 있다고 가정한다(레포마다 복사하지 않음).
-#   - 멀티 런타임은 잡마다 `mise use node@X python@Y` 또는 레포 루트 .mise.toml 로 선택.
+# Key assumptions (important):
+#   - The runner runs jobs in a non-login bash. Runtimes (node/python/mise shims)
+#     are already injected via config.toml environment[] (BASH_ENV/MISE_DATA_DIR/PATH).
+#     The mise activate in before_script below is only a *double safety net*; the
+#     primary path is config.toml.
+#   - codeartifact-login.sh is assumed installed at a fixed AMI path
+#     (/usr/local/bin/codeartifact-login.sh) — not copied per repo.
+#   - Multi-runtime is selected per job via `mise use node@X python@Y` or a repo-root .mise.toml.
 #
-# 검증 포인트:
-#   - runtime-matrix 잡: 설치된 node 18/20/22 + python 3.10/3.11/3.12 가 실제 전환되어
-#     shims 로 노출되는지 증명(parallel.matrix).
+# Validation points:
+#   - runtime-matrix job: proves the installed node 18/20/22 + python 3.10/3.11/3.12
+#     actually switch and are exposed via shims (parallel.matrix).
 #   - build:app(node22/py3.12), deploy:cdk-ts-dev(node18), deploy:cdk-py-prod(node20/py3.10)
-#     로 서로 다른 버전을 실제로 사용 -> 멀티 런타임 증명.
-#   - cross-account: Model A(자동 가정, dev) + Model B(AWS_PROFILE, prod).
-#   - CodeBuild 트리거 잡(assume-role -> StartBuild -> 폴링, 타임아웃 가드).
+#     actually use different versions -> proves multi-runtime.
+#   - cross-account: Model A (auto-assume, dev) + Model B (AWS_PROFILE, prod).
+#   - CodeBuild trigger job (assume-role -> StartBuild -> poll, with a timeout guard).
 # =============================================================================
 
 variables:
   AWS_REGION: "ap-northeast-2"
   AWS_DEFAULT_REGION: "ap-northeast-2"
-  # STS 는 반드시 in-VPC 리전 엔드포인트(global sts.amazonaws.com 은 엔드포인트 없어 hang).
+  # STS must use the in-VPC regional endpoint (global sts.amazonaws.com has no endpoint and hangs).
   AWS_STS_REGIONAL_ENDPOINTS: "regional"
-  # CodeArtifact (러너 계정 소유; codeartifact-login.sh 와 동일 값)
+  # CodeArtifact (owned by the runner account; same values as codeartifact-login.sh)
   CA_DOMAIN: "my-domain"
   CA_DOMAIN_OWNER: "999999999999"
   CA_NPM_REPO: "npm-store"
   CA_PYPI_REPO: "pypi-store"
-  # mise 공용 데이터/설정(부트스트랩과 동일) — before_script 안전망용.
+  # mise shared data/config (same as the bootstrap) — for the before_script safety net.
   MISE_DATA_DIR: "/usr/local/share/mise"
   MISE_CONFIG_DIR: "/etc/mise"
-  # npm 캐시를 프로젝트 디렉터리로 돌려 cache.paths 의 .npm/ 가 실제로 쓰이게 함
-  # (기본 npm 캐시는 ~/.npm 이라 프로젝트 상대 .npm/ 캐시는 무의미해짐).
+  # Point the npm cache at the project directory so cache.paths' .npm/ is actually used
+  # (the default npm cache is ~/.npm, making a project-relative .npm/ cache meaningless).
   npm_config_cache: "${CI_PROJECT_DIR}/.npm"
-  # 토큰 로그 누수 방지 — 디버그 트레이스 비활성(절대 true 로 켜지 말 것: pip.conf/env 토큰 노출).
+  # Prevent token log leakage — disable debug trace (NEVER set true: it exposes pip.conf/env tokens).
   CI_DEBUG_TRACE: "false"
   GIT_DEPTH: "20"
 
 # =============================================================================
-# default: 모든 잡 공통 before_script + 캐시
+# default: shared before_script + cache for all jobs
 # -----------------------------------------------------------------------------
-# 1) mise shims 활성화(이중 안전망; 주 경로는 config.toml environment[]).
-#    MISE_DATA_DIR 을 명시 export 해야 shims 가 공용 /usr/local/share/mise 를 가리킨다
-#    (미설정 시 ~/.local/share/mise 의 빈 디렉터리를 보게 됨).
-# 2) codeartifact-login.sh 를 source 하여 토큰/환경변수를 현재 셸에 주입.
-#    AWS_PROFILE 이 잡 변수로 설정돼 있어도 CA 토큰은 *러너 계정*에서 받아야 하므로
-#    AWS_PROFILE 을 비운 채 source 한다(스크립트도 내부적으로 비우지만 이중 안전).
-# 3) sourced helper 는 실패를 자동 전파하지 않으므로 토큰/센티넬을 직접 검증한다.
+# 1) Activate mise shims (double safety net; the primary path is config.toml environment[]).
+#    MISE_DATA_DIR must be explicitly exported so shims point at the shared /usr/local/share/mise
+#    (otherwise it sees the empty ~/.local/share/mise directory).
+# 2) source codeartifact-login.sh to inject the token/env vars into the current shell.
+#    Even if AWS_PROFILE is set as a job variable, the CA token must come from the *runner account*,
+#    so source it with AWS_PROFILE emptied (the script also empties it internally — double safety).
+# 3) The sourced helper does not auto-propagate failure, so verify the token/sentinel directly.
 # =============================================================================
 default:
   tags:
@@ -62,7 +62,7 @@ default:
     - eval "$(/usr/local/bin/mise activate bash --shims)"
     - 'echo "node=$(node -v 2>/dev/null || echo missing)  python=$(python -V 2>&1 || echo missing)"'
     - AWS_PROFILE="" . /usr/local/bin/codeartifact-login.sh
-    - '[ -n "${CODEARTIFACT_AUTH_TOKEN:-}" ] && [ "${CA_LOGIN_OK:-0}" = "1" ] || { echo "CodeArtifact 로그인 실패"; exit 1; }'
+    - '[ -n "${CODEARTIFACT_AUTH_TOKEN:-}" ] && [ "${CA_LOGIN_OK:-0}" = "1" ] || { echo "CodeArtifact login failed"; exit 1; }'
   cache:
     key:
       files:
@@ -82,8 +82,8 @@ stages:
   - codebuild
 
 # =============================================================================
-# runtime-matrix: 설치된 모든 node/python 버전이 shims 로 전환/노출되는지 증명.
-# parallel.matrix 로 각 조합을 실제 `mise use` 해서 PATH 노출과 버전 일치를 어서트.
+# runtime-matrix: prove every installed node/python version switches/exposes via shims.
+# parallel.matrix runs each combination with a real `mise use` and asserts PATH exposure + version match.
 # =============================================================================
 runtime-matrix:
   stage: build
@@ -98,14 +98,14 @@ runtime-matrix:
   script:
     - mise use "node@${NODE_VERSION}" "python@${PYTHON_VERSION}"
     - 'echo "selected node=$(node -v)  python=$(python -V 2>&1)"'
-    - 'node -v | grep -q "^v${NODE_VERSION}\." || { echo "node 버전 불일치"; exit 1; }'
-    - 'python -V 2>&1 | grep -q "Python ${PYTHON_VERSION}\." || { echo "python 버전 불일치"; exit 1; }'
+    - 'node -v | grep -q "^v${NODE_VERSION}\." || { echo "node version mismatch"; exit 1; }'
+    - 'python -V 2>&1 | grep -q "Python ${PYTHON_VERSION}\." || { echo "python version mismatch"; exit 1; }'
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH'
 
 # =============================================================================
-# build:app: node22 / python3.12 고정, CodeArtifact 경유 npm ci + build.
+# build:app: pin node22 / python3.12; npm ci + build via CodeArtifact.
 # =============================================================================
 build:app:
   stage: build
@@ -123,13 +123,13 @@ build:app:
     - if: '$CI_COMMIT_BRANCH'
 
 # =============================================================================
-# diff:cdk-dev: TypeScript CDK synth/diff (Model A 자동 가정, dev=111...).
+# diff:cdk-dev: TypeScript CDK synth/diff (Model A auto-assume, dev=111...).
 # -----------------------------------------------------------------------------
-# 크로스계정 컨텍스트 lookup 은 *타겟 계정*의 cdk-hnb659fds-lookup-role 을 가정해
-# 수행된다(RunnerRole 의 ec2:Describe* 가 아님). 그 lookup-role 은 정책의 AssumeRole
-# 목록(region 와일드카드)에 포함돼 있다.
-# cdk diff 는 변경이 있어도 기본 exit 0 이다. '|| true' 로 *모든* 에러를 삼키지 말 것.
-# (드리프트로 파이프라인을 막으려면 --fail 사용; 여기서는 정보용이라 미사용.)
+# The cross-account context lookup is performed by assuming the *target account's*
+# cdk-hnb659fds-lookup-role (not RunnerRole's ec2:Describe*). That lookup-role is
+# included in the policy's AssumeRole list (region wildcard).
+# cdk diff exits 0 by default even when there are changes. Do NOT swallow *all* errors with '|| true'.
+# (To block the pipeline on drift, use --fail; here it is informational so unused.)
 # =============================================================================
 diff:cdk-dev:
   stage: diff
@@ -146,9 +146,9 @@ diff:cdk-dev:
     - if: '$CI_COMMIT_BRANCH == "main"'
 
 # =============================================================================
-# deploy:cdk-ts-dev: TypeScript CDK 배포 (Model A 자동 가정, node18 로 전환).
+# deploy:cdk-ts-dev: TypeScript CDK deploy (Model A auto-assume, switch to node18).
 # -----------------------------------------------------------------------------
-# aws-cdk 는 전역 설치하지 말고 package.json 에 핀(aws-cdk/aws-cdk-lib)하여 npx 로.
+# Do not install aws-cdk globally; pin it in package.json (aws-cdk/aws-cdk-lib) and run via npx.
 # =============================================================================
 deploy:cdk-ts-dev:
   stage: deploy
@@ -159,7 +159,7 @@ deploy:cdk-ts-dev:
     - mise use node@18
     - 'echo "deploy node=$(node -v)"'
     - npm ci
-    # 최초 1회만(주석): 대상 계정 부트스트랩(러너 계정 신뢰).
+    # one-time only (commented): bootstrap the target account (trust the runner account).
     #   npx cdk bootstrap aws://111111111111/ap-northeast-2 \
     #     --trust 999999999999 \
     #     --cloudformation-execution-policies arn:aws:iam::aws:policy/AdministratorAccess
@@ -171,16 +171,16 @@ deploy:cdk-ts-dev:
       when: manual
 
 # =============================================================================
-# deploy:cdk-py-prod: Python CDK 배포 (Model B, prod=333..., node20/py3.10 로 전환).
+# deploy:cdk-py-prod: Python CDK deploy (Model B, prod=333..., switch to node20/py3.10).
 # -----------------------------------------------------------------------------
-# Model B 명시 가정은 AWS_PROFILE=prod (Ec2InstanceMetadata 프로파일) 로 한다.
-# [주의] AWS_PROFILE 을 잡 variables 로 두면 before_script(CodeArtifact)까지 영향받아
-#        러너 계정이 아닌 prod 계정으로 토큰을 받으려다 실패한다. 따라서 AWS_PROFILE 은
-#        반드시 *script 안에서만* export 한다(before_script 는 instance role 로 동작).
-# [주의] --role-arn 은 CDK CLI 의 cross-account 가정 수단이 *아니다*. 그것은
-#        CloudFormation *실행 역할*을 지정할 뿐이며 CLI 인증은 여전히 환경 자격증명
-#        (=AWS_PROFILE/exported creds)을 쓴다. cross-account 가정은 AWS_PROFILE 또는
-#        aws sts assume-role 후 env export 로 한다.
+# Model B explicit assume uses AWS_PROFILE=prod (the Ec2InstanceMetadata profile).
+# [NOTE] If you set AWS_PROFILE as a job variable, it also affects before_script (CodeArtifact),
+#        which would try to fetch the token from the prod account instead of the runner account and fail.
+#        So AWS_PROFILE must be exported *inside the script only* (before_script runs as the instance role).
+# [NOTE] --role-arn is NOT the CDK CLI's cross-account assume mechanism. It only sets the
+#        CloudFormation *execution role*; CLI auth still uses the environment credentials
+#        (=AWS_PROFILE/exported creds). Cross-account assume is done via AWS_PROFILE or
+#        'aws sts assume-role' followed by env export.
 # =============================================================================
 deploy:cdk-py-prod:
   stage: deploy
@@ -194,11 +194,11 @@ deploy:cdk-py-prod:
     - . .venv/bin/activate
     - pip install -r requirements.txt
     - npm ci
-    # ── 여기서부터 cross-account: AWS_PROFILE 을 script 내부에서만 export ──
+    # ── cross-account starts here: export AWS_PROFILE inside the script only ──
     - export AWS_PROFILE=prod
     - 'echo "cross-account identity: $(aws sts get-caller-identity --query Arn --output text)"'
     - npx cdk deploy --all --require-approval never
-    # (대안) 프로파일 없이 명시 가정:
+    # (alternative) explicit assume without a profile:
     #   CREDS=$(aws sts assume-role --role-arn arn:aws:iam::333333333333:role/OrgDeployRole \
     #            --role-session-name "gitlab-prod-${CI_JOB_ID}" \
     #            ${EXTERNAL_ID:+--external-id "${EXTERNAL_ID}"} \
@@ -207,7 +207,7 @@ deploy:cdk-py-prod:
     #   export AWS_SECRET_ACCESS_KEY=$(echo "$CREDS" | cut -f2)
     #   export AWS_SESSION_TOKEN=$(echo "$CREDS" | cut -f3)
     #   npx cdk deploy --all --require-approval never
-    # (참고) --role-arn 은 CFN 실행 역할 지정용일 뿐, 위 가정과 별개다.
+    # (note) --role-arn is only for specifying the CFN execution role, separate from the assume above.
   environment:
     name: prod
   rules:
@@ -215,17 +215,17 @@ deploy:cdk-py-prod:
       when: manual
 
 # =============================================================================
-# codebuild:trigger: cross-account CodeBuild 트리거 + 폴링.
+# codebuild:trigger: cross-account CodeBuild trigger + polling.
 # -----------------------------------------------------------------------------
-# 크로스계정 StartBuild 는 RunnerRole 로 직접 불가하므로 *타겟 역할을 먼저 가정* 한다.
-# 따라서 codebuild:StartBuild 권한은 RunnerRole 이 아니라 *타겟 계정의 OrgDeployRole*
-# 에 있어야 한다(iam-runner-policy.json 은 same-account 프로젝트만 부여).
+# Cross-account StartBuild cannot be done directly by RunnerRole, so *assume the target role first*.
+# Therefore the codebuild:StartBuild permission must be on the *target account's OrgDeployRole*,
+# not on RunnerRole (iam-runner-policy.json grants same-account projects only).
 #
-# 자격증명 위생:
-#   - 가정한 자격증명이 잡 나머지로 새지 않도록 *서브셸* () 안에서만 사용.
-#   - role-session-name 은 잡 단위 유일(CI_JOB_ID) -> CloudTrail 상관관계.
-#   - 폴링 루프에 최대 시도/타임아웃 가드(러너 슬롯 무한 점유 방지; STS 체이닝 1h 캡 직전).
-#   - 빈/불완전 자격증명 검증 후 export.
+# Credential hygiene:
+#   - Use the assumed credentials only inside a *subshell* () so they do not leak into the rest of the job.
+#   - role-session-name is per-job unique (CI_JOB_ID) -> CloudTrail correlation.
+#   - The poll loop has a max-attempt/timeout guard (avoid holding a runner slot forever; just under the 1h STS chaining cap).
+#   - Validate empty/incomplete credentials before export.
 # =============================================================================
 codebuild:trigger:
   stage: codebuild
@@ -233,7 +233,7 @@ codebuild:trigger:
     TARGET_ROLE_ARN: "arn:aws:iam::222222222222:role/OrgDeployRole"
     CODEBUILD_PROJECT: "my-deploy-project"
     CODEBUILD_REGION: "ap-northeast-2"
-    POLL_MAX_ATTEMPTS: "120"   # 120 * 30s = 60분 상한 (STS 체이닝 1h 캡 직전)
+    POLL_MAX_ATTEMPTS: "120"   # 120 * 30s = 60-minute cap (just under the 1h STS chaining cap)
     POLL_INTERVAL_SEC: "30"
   script:
     - |
@@ -247,7 +247,7 @@ codebuild:trigger:
           --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
           --output text)"
         [ -n "${CREDS}" ] && [ "$(printf '%s' "${CREDS}" | wc -w)" -eq 3 ] \
-          || { echo "assume-role 실패(빈/불완전 자격증명)"; exit 1; }
+          || { echo "assume-role failed (empty/incomplete credentials)"; exit 1; }
         export AWS_ACCESS_KEY_ID="$(printf '%s' "${CREDS}" | cut -f1)"
         export AWS_SECRET_ACCESS_KEY="$(printf '%s' "${CREDS}" | cut -f2)"
         export AWS_SESSION_TOKEN="$(printf '%s' "${CREDS}" | cut -f3)"
@@ -266,11 +266,11 @@ codebuild:trigger:
             --query 'builds[0].buildStatus' --output text)"
           echo "[${attempt}/${POLL_MAX_ATTEMPTS}] CodeBuild status=${STATUS}"
           case "${STATUS}" in
-            SUCCEEDED) echo "빌드 성공"; break ;;
-            FAILED|FAULT|STOPPED|TIMED_OUT) echo "빌드 실패: ${STATUS}"; exit 1 ;;
+            SUCCEEDED) echo "build succeeded"; break ;;
+            FAILED|FAULT|STOPPED|TIMED_OUT) echo "build failed: ${STATUS}"; exit 1 ;;
           esac
           if [ "${attempt}" -ge "${POLL_MAX_ATTEMPTS}" ]; then
-            echo "폴링 타임아웃(${POLL_MAX_ATTEMPTS} 회 초과)"; exit 1
+            echo "polling timeout (exceeded ${POLL_MAX_ATTEMPTS} attempts)"; exit 1
           fi
           sleep "${POLL_INTERVAL_SEC}"
         done
@@ -280,33 +280,34 @@ codebuild:trigger:
       when: manual
 
 # =============================================================================
-# [참고] 소비 레포 루트에 추가할 .mise.toml 예시(잡별 mise use 대신 레포 고정 시):
+# [NOTE] Example .mise.toml to add at the consuming repo root (to pin runtimes per repo
+#        instead of per-job mise use):
 #   [tools]
 #   node = "20"
 #   python = "3.11"
-# 또는 asdf 호환 .tool-versions:
+# or an asdf-compatible .tool-versions:
 #   node 20
 #   python 3.11
 #
-# [참고] STS 역할 체이닝 캡: 인스턴스 역할 -> 타겟 역할 가정(체이닝)은 타겟의
-#   MaxSessionDuration 과 무관하게 *1시간* 하드캡이다. 긴 CDK 배포는 Model A 의
-#   per-operation 재가정(cdk 가 호출마다 재assume)을 선호하라. codebuild 폴링은
-#   위 POLL_MAX_ATTEMPTS 로 1h 이내 종료되게 한다.
+# [NOTE] STS role-chaining cap: assuming a target role from the instance role (chaining) is
+#   a *1-hour* hard cap regardless of the target's MaxSessionDuration. For long CDK deploys,
+#   prefer Model A's per-operation re-assume (cdk re-assumes per call). The codebuild poll is
+#   bounded by POLL_MAX_ATTEMPTS above to finish within 1h.
 #
-# [참고] 12h CodeArtifact 토큰: before_script 가 잡마다 갱신한다. 12h 를 초과하는
-#   단일 잡은 잡 중간에 codeartifact-login.sh 를 재-source 해야 한다.
+# [NOTE] 12h CodeArtifact token: before_script refreshes it per job. A single job exceeding 12h
+#   must re-source codeartifact-login.sh mid-job.
 # =============================================================================
 
 # =============================================================================
-# [참고] 필요한 VPC 엔드포인트 서비스명 (별도 IaC 로 생성, 스크립트가 만들지 않음)
+# [NOTE] Required VPC endpoint service names (created via separate IaC; the script does not create them)
 # -----------------------------------------------------------------------------
 #   Gateway:
 #     com.amazonaws.<region>.s3
-#       *필수*: CDK 에셋/부트스트랩 버킷 + CodeArtifact 패키지 페이로드(AWS 소유 S3
-#       버킷에서 제공) + 러너 캐시. 단순 캐시 옵션이 아니라 CodeArtifact 다운로드의
-#       필수 경로다.
-#   Interface (모두 Private DNS = ENABLED 필수; 아니면 호스트네임 해석 실패):
-#     com.amazonaws.<region>.sts                       (리전, NOT global)
+#       *REQUIRED*: CDK asset/bootstrap buckets + CodeArtifact package payloads (served from an
+#       AWS-owned S3 bucket) + runner cache. Not a mere cache option, but the required path for
+#       CodeArtifact downloads.
+#   Interface (all must have Private DNS = ENABLED; otherwise hostname resolution fails):
+#     com.amazonaws.<region>.sts                       (regional, NOT global)
 #     com.amazonaws.<region>.cloudformation
 #     com.amazonaws.<region>.codeartifact.api
 #     com.amazonaws.<region>.codeartifact.repositories
@@ -318,5 +319,5 @@ codebuild:trigger:
 #     com.amazonaws.<region>.ssmmessages
 #     com.amazonaws.<region>.ec2messages
 #     com.amazonaws.<region>.codebuild
-#   (선택) com.amazonaws.<region>.secretsmanager / .ec2 / .dynamodb(Gateway)
+#   (optional) com.amazonaws.<region>.secretsmanager / .ec2 / .dynamodb(Gateway)
 # =============================================================================

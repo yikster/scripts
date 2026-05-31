@@ -1,60 +1,60 @@
 #!/usr/bin/env bash
 # codeartifact-login.sh
 # ──────────────────────────────────────────────────────────────────────────────
-# AWS CodeArtifact 12h 토큰을 갱신하고 npm/pip/uv (옵션: poetry/twine) 를 설정한다.
+# Refreshes the AWS CodeArtifact 12h token and configures npm/pip/uv (optional: poetry/twine).
 #
-# 듀얼 모드:
-#   1) 직접 실행 (./codeartifact-login.sh) : set -euo pipefail 로 엄격 실행, 실패 시 exit.
-#   2) source ( . ./codeartifact-login.sh ): CI before_script 용.
-#      - 자동으로 ca_main 을 호출한다 (호출부는 별도 호출 불필요).
-#      - 단, source 된 셸의 -e 를 오염시키지 않으며, 실패 시 exit 대신 return 한다.
-#        => 호출부(before_script)는 반드시 토큰 비어있음을 직접 검증해야 한다:
+# Dual mode:
+#   1) direct run (./codeartifact-login.sh) : runs strictly with set -euo pipefail, exits on failure.
+#   2) sourced   ( . ./codeartifact-login.sh): for CI before_script.
+#      - automatically calls ca_main (the caller does not need a separate call).
+#      - does NOT pollute the sourcing shell's -e, and on failure it returns instead of exiting.
+#        => the caller (before_script) MUST verify the token is non-empty itself:
 #             . /usr/local/bin/codeartifact-login.sh
 #             [ -n "${CODEARTIFACT_AUTH_TOKEN:-}" ] || { echo "CA login failed"; exit 1; }
 #
-# 중요(프라이빗 서브넷): CodeArtifact 도메인은 *러너 계정* 소유다. 잡에서 AWS_PROFILE
-# (cross-account deploy role) 이 설정돼 있으면 토큰 호출이 엉뚱한 계정으로 가므로,
-# CodeArtifact 호출은 항상 AWS_PROFILE 을 비워(instance role) 수행한다.
+# IMPORTANT (private subnet): the CodeArtifact domain is owned by the *runner account*.
+# If a job has AWS_PROFILE set (a cross-account deploy role), the token call would go to
+# the wrong account, so CodeArtifact calls are always made with AWS_PROFILE emptied (instance role).
 # ──────────────────────────────────────────────────────────────────────────────
 
-# source 여부 감지
+# Detect whether we are sourced
 _ca_sourced=0
 if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
   _ca_sourced=1
 fi
 
-# 직접 실행일 때만 엄격 모드 (source 시 호출부 -e 오염 방지)
+# Strict mode only when run directly (avoid polluting the caller's -e when sourced)
 if [[ "${_ca_sourced}" -eq 0 ]]; then
   set -euo pipefail
 fi
 
 # ==============================================================================
-# 공유 설정 헤더 (companion 스크립트들과 동일 변수명)
+# Shared config header (same variable names as the companion scripts)
 # ==============================================================================
 AWS_REGION="${AWS_REGION:-ap-northeast-2}"
 CA_DOMAIN="${CA_DOMAIN:-my-domain}"
-CA_DOMAIN_OWNER="${CA_DOMAIN_OWNER:-999999999999}"   # CodeArtifact 도메인 소유 = 러너 계정
+CA_DOMAIN_OWNER="${CA_DOMAIN_OWNER:-999999999999}"   # CodeArtifact domain owner = runner account
 CA_NPM_REPO="${CA_NPM_REPO:-npm-store}"
 CA_PYPI_REPO="${CA_PYPI_REPO:-pypi-store}"
 
-# 도구별 토글
+# Per-tool toggles
 CONFIGURE_NPM="${CONFIGURE_NPM:-true}"
 CONFIGURE_PIP="${CONFIGURE_PIP:-true}"
 CONFIGURE_UV="${CONFIGURE_UV:-true}"
 CONFIGURE_POETRY="${CONFIGURE_POETRY:-false}"
 CONFIGURE_TWINE="${CONFIGURE_TWINE:-false}"
 
-# uv 네임드 인덱스 이름 (pyproject.toml 의 [[tool.uv.index]] name 과 반드시 일치해야 함)
-# 환경변수 세그먼트는 대문자 + 비영숫자->underscore 규칙: private-registry -> PRIVATE_REGISTRY
+# uv named-index name (MUST match the [[tool.uv.index]] name in pyproject.toml)
+# The env-var segment rule is uppercase + non-alphanumeric->underscore: private-registry -> PRIVATE_REGISTRY
 UV_INDEX_NAME="${UV_INDEX_NAME:-private-registry}"
 
 # ==============================================================================
-# 유틸
+# Utilities
 # ==============================================================================
 _ca_log()  { printf '\033[1;34m[ca]\033[0m %s\n' "$*"; }
 _ca_warn() { printf '\033[1;33m[ca-warn]\033[0m %s\n' "$*" >&2; }
 
-# 실패 처리: 직접 실행이면 exit, source 면 return (exported 변수 보존).
+# Failure handling: exit if run directly, return if sourced (preserve exported vars).
 _ca_fail() {
   printf '\033[1;31m[ca-fail]\033[0m %s\n' "$*" >&2
   if [[ "${_ca_sourced}" -eq 1 ]]; then
@@ -64,31 +64,31 @@ _ca_fail() {
   fi
 }
 
-# HOME 해석 (root/sudo/systemd 모두 안전)
+# Resolve HOME (safe under root/sudo/systemd)
 _ca_resolve_home() {
   if [[ -n "${HOME:-}" && -d "${HOME}" ]]; then
     printf '%s' "${HOME}"
     return 0
   fi
-  # systemd/cron 등에서 HOME 이 비어있을 때
+  # when HOME is empty under systemd/cron, etc.
   local u; u="$(id -un)"
   getent passwd "${u}" | cut -d: -f6
 }
 
-# 환경변수 세그먼트 변환: private-registry -> PRIVATE_REGISTRY
+# Env-var segment conversion: private-registry -> PRIVATE_REGISTRY
 _ca_env_segment() {
   printf '%s' "$1" | tr '[:lower:]-' '[:upper:]_'
 }
 
 # ==============================================================================
-# 토큰 + 엔드포인트 취득 (항상 instance role 로; AWS_PROFILE 오염 방지)
+# Fetch token + endpoints (always as the instance role; prevent AWS_PROFILE pollution)
 # ==============================================================================
 ca_fetch_token_and_endpoints() {
-  command -v aws >/dev/null 2>&1 || { _ca_fail "aws CLI 가 없습니다."; return 1; }
+  command -v aws >/dev/null 2>&1 || { _ca_fail "the aws CLI is missing."; return 1; }
 
-  # AWS_PROFILE 을 비워 instance role(러너 계정)로 강제. STS 는 리전 엔드포인트.
+  # Empty AWS_PROFILE to force the instance role (runner account). STS uses the regional endpoint.
   local token
-  token="$(AWS_PROFILE= AWS_STS_REGIONAL_ENDPOINTS=regional \
+  token="$(AWS_PROFILE='' AWS_STS_REGIONAL_ENDPOINTS=regional \
             aws codeartifact get-authorization-token \
               --domain "${CA_DOMAIN}" \
               --domain-owner "${CA_DOMAIN_OWNER}" \
@@ -96,28 +96,28 @@ ca_fetch_token_and_endpoints() {
               --query authorizationToken --output text 2>/dev/null)" || true
 
   if [[ -z "${token}" || "${token}" == "None" ]]; then
-    _ca_fail "CodeArtifact 토큰 발급 실패. 확인: sts:GetServiceBearerToken 권한, codeartifact.api 엔드포인트, AWS_PROFILE 누수."
+    _ca_fail "CodeArtifact token issuance failed. Check: sts:GetServiceBearerToken permission, codeartifact.api endpoint, AWS_PROFILE leakage."
     return 1
   fi
   export CODEARTIFACT_AUTH_TOKEN="${token}"
 
-  CA_NPM_ENDPOINT="$(AWS_PROFILE= aws codeartifact get-repository-endpoint \
+  CA_NPM_ENDPOINT="$(AWS_PROFILE='' aws codeartifact get-repository-endpoint \
       --domain "${CA_DOMAIN}" --domain-owner "${CA_DOMAIN_OWNER}" \
       --repository "${CA_NPM_REPO}" --format npm \
       --region "${AWS_REGION}" --query repositoryEndpoint --output text 2>/dev/null)" || true
-  CA_PYPI_ENDPOINT="$(AWS_PROFILE= aws codeartifact get-repository-endpoint \
+  CA_PYPI_ENDPOINT="$(AWS_PROFILE='' aws codeartifact get-repository-endpoint \
       --domain "${CA_DOMAIN}" --domain-owner "${CA_DOMAIN_OWNER}" \
       --repository "${CA_PYPI_REPO}" --format pypi \
       --region "${AWS_REGION}" --query repositoryEndpoint --output text 2>/dev/null)" || true
 
   if [[ -z "${CA_NPM_ENDPOINT:-}" || "${CA_NPM_ENDPOINT}" == "None" ]]; then
-    _ca_fail "npm 레포 엔드포인트 조회 실패 (codeartifact.api 엔드포인트/권한 확인)."; return 1
+    _ca_fail "npm repo endpoint lookup failed (check the codeartifact.api endpoint/permissions)."; return 1
   fi
   if [[ -z "${CA_PYPI_ENDPOINT:-}" || "${CA_PYPI_ENDPOINT}" == "None" ]]; then
-    _ca_fail "pypi 레포 엔드포인트 조회 실패."; return 1
+    _ca_fail "pypi repo endpoint lookup failed."; return 1
   fi
   export CA_NPM_ENDPOINT CA_PYPI_ENDPOINT
-  _ca_log "토큰/엔드포인트 취득 완료 (npm=${CA_NPM_ENDPOINT}, pypi=${CA_PYPI_ENDPOINT})"
+  _ca_log "fetched token/endpoints (npm=${CA_NPM_ENDPOINT}, pypi=${CA_PYPI_ENDPOINT})"
   return 0
 }
 
@@ -128,7 +128,7 @@ ca_configure_npm() {
   [[ "${CONFIGURE_NPM}" == "true" ]] || return 0
   local home host
   home="$(_ca_resolve_home)"
-  # registry URL 에서 스킴 제거 -> //host/path/ 형태의 authToken 키 생성
+  # strip the scheme from the registry URL -> build the //host/path/ authToken key
   host="${CA_NPM_ENDPOINT#https://}"
 
   umask 077
@@ -136,16 +136,16 @@ ca_configure_npm() {
 registry=${CA_NPM_ENDPOINT}
 //${host}:_authToken=${CODEARTIFACT_AUTH_TOKEN}
 //${host}:always-auth=true
-# 스코프 패키지 예시:
+# scoped package example:
 # @myorg:registry=${CA_NPM_ENDPOINT}
 EOF
   chmod 600 "${home}/.npmrc"
-  _ca_log "npm 설정 완료: ${home}/.npmrc"
+  _ca_log "npm configured: ${home}/.npmrc"
 }
 
 # ==============================================================================
-# pip (~/.config/pip/pip.conf) — 토큰은 conf 파일(600)에만 두고 env 로 export 하지 않는다.
-# (PIP_INDEX_URL 로 export 하면 CI_DEBUG_TRACE/set -x 시 토큰이 로그로 새어나간다.)
+# pip (~/.config/pip/pip.conf) — keep the token only in the conf file (600), do not export via env.
+# (Exporting via PIP_INDEX_URL would leak the token to logs under CI_DEBUG_TRACE/set -x.)
 # ==============================================================================
 ca_configure_pip() {
   [[ "${CONFIGURE_PIP}" == "true" ]] || return 0
@@ -154,14 +154,14 @@ ca_configure_pip() {
   host="${CA_PYPI_ENDPOINT#https://}"
   host="${host%/}"
 
-  # 토큰을 URL userinfo 로 안전하게 인코딩 (드물지만 URL-unsafe 문자 대비)
+  # Safely URL-encode the token as URL userinfo (in the rare case of URL-unsafe chars)
   if command -v python3 >/dev/null 2>&1; then
     enc_token="$(python3 -c 'import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1],safe=""))' "${CODEARTIFACT_AUTH_TOKEN}")"
   else
     enc_token="${CODEARTIFACT_AUTH_TOKEN}"
   fi
 
-  # pip index-url 은 반드시 /simple/ 로 끝나야 한다.
+  # the pip index-url must end with /simple/.
   index_url="https://aws:${enc_token}@${host}/simple/"
 
   cfg_dir="${home}/.config/pip"
@@ -172,17 +172,17 @@ ca_configure_pip() {
 index-url = ${index_url}
 EOF
   chmod 600 "${cfg_dir}/pip.conf"
-  # 부모 디렉터리도 그룹/기타 읽기 차단
+  # also block group/other read on the parent directory
   chmod 700 "${home}/.config" 2>/dev/null || true
-  # 명시적으로 PIP_INDEX_URL 을 *export 하지 않는다* (토큰 로그 누수 방지).
+  # explicitly do NOT export PIP_INDEX_URL (prevent token log leakage).
   unset PIP_INDEX_URL || true
-  _ca_log "pip 설정 완료: ${cfg_dir}/pip.conf (토큰은 env 로 노출하지 않음)"
+  _ca_log "pip configured: ${cfg_dir}/pip.conf (token not exposed via env)"
 }
 
 # ==============================================================================
-# uv (네임드 인덱스 + 자격증명; UV_DEFAULT_INDEX 로 PyPI 대체)
-# uv 는 UV_INDEX_<NAME>_USERNAME/PASSWORD 를 *이름 있는* 인덱스에만 매칭한다.
-# 따라서 UV_INDEX="name=url" 로 이름을 부여하고, 동일 NAME 세그먼트로 자격증명을 준다.
+# uv (named index + credentials; UV_DEFAULT_INDEX replaces PyPI)
+# uv matches UV_INDEX_<NAME>_USERNAME/PASSWORD only against a *named* index.
+# So we name the index via UV_INDEX="name=url" and supply credentials using the same NAME segment.
 # ==============================================================================
 ca_configure_uv() {
   [[ "${CONFIGURE_UV}" == "true" ]] || return 0
@@ -192,38 +192,38 @@ ca_configure_uv() {
   index_url="https://${host}/simple/"
   seg="$(_ca_env_segment "${UV_INDEX_NAME}")"   # private-registry -> PRIVATE_REGISTRY
 
-  # 네임드 인덱스 정의 + 기본 인덱스로 지정 (공개 PyPI 대체)
+  # define the named index + set it as the default index (replacing public PyPI)
   export UV_INDEX="${UV_INDEX_NAME}=${index_url}"
   export UV_DEFAULT_INDEX="${index_url}"
-  # 동일 이름 세그먼트로 자격증명 (UV_INDEX_PRIVATE_REGISTRY_USERNAME/PASSWORD)
+  # credentials using the same name segment (UV_INDEX_PRIVATE_REGISTRY_USERNAME/PASSWORD)
   export "UV_INDEX_${seg}_USERNAME=aws"
   export "UV_INDEX_${seg}_PASSWORD=${CODEARTIFACT_AUTH_TOKEN}"
 
   if [[ "${_ca_sourced}" -eq 0 ]]; then
-    _ca_warn "uv 환경변수는 *현재 셸*에만 export 됩니다. CI 에서는 이 스크립트를 'source' 하세요."
+    _ca_warn "uv env vars are exported to the *current shell* only. In CI, 'source' this script."
   fi
-  _ca_log "uv 설정 완료 (index name='${UV_INDEX_NAME}'; pyproject 의 인덱스 이름이 동일해야 함)"
+  _ca_log "uv configured (index name='${UV_INDEX_NAME}'; the index name in pyproject must match)"
 }
 
 # ==============================================================================
-# poetry (옵션) — POETRY_HTTP_BASIC_* (source 시에만 propagate)
+# poetry (optional) — POETRY_HTTP_BASIC_* (propagated only when sourced)
 # ==============================================================================
 ca_configure_poetry() {
   [[ "${CONFIGURE_POETRY}" == "true" ]] || return 0
   local host
   host="${CA_PYPI_ENDPOINT#https://}"; host="${host%/}"
-  # poetry repository 이름은 'private' 로 가정 (pyproject 의 source name 과 일치 필요)
+  # assumes the poetry repository name is 'private' (must match the source name in pyproject)
   export POETRY_REPOSITORIES_PRIVATE_URL="https://${host}/simple/"
   export POETRY_HTTP_BASIC_PRIVATE_USERNAME="aws"
   export POETRY_HTTP_BASIC_PRIVATE_PASSWORD="${CODEARTIFACT_AUTH_TOKEN}"
   if [[ "${_ca_sourced}" -eq 0 ]]; then
-    _ca_warn "poetry 환경변수는 source 시에만 propagate 됩니다."
+    _ca_warn "poetry env vars only propagate when sourced."
   fi
-  _ca_log "poetry 설정 완료 (source name 'private' 가정)"
+  _ca_log "poetry configured (assumes source name 'private')"
 }
 
 # ==============================================================================
-# twine (옵션) — ~/.pypirc
+# twine (optional) — ~/.pypirc
 # ==============================================================================
 ca_configure_twine() {
   [[ "${CONFIGURE_TWINE}" == "true" ]] || return 0
@@ -241,7 +241,7 @@ username = aws
 password = ${CODEARTIFACT_AUTH_TOKEN}
 EOF
   chmod 600 "${home}/.pypirc"
-  _ca_log "twine 설정 완료: ${home}/.pypirc"
+  _ca_log "twine configured: ${home}/.pypirc"
 }
 
 # ==============================================================================
@@ -254,19 +254,19 @@ ca_main() {
   ca_configure_uv     || return 1
   ca_configure_poetry || return 1
   ca_configure_twine  || return 1
-  # 성공 센티넬 (호출부가 확인 가능)
+  # success sentinel (the caller can verify it)
   export CA_LOGIN_OK=1
-  _ca_log "CodeArtifact 로그인 완료 (토큰 TTL 최대 12h — 잡마다 재실행 필요)."
+  _ca_log "CodeArtifact login complete (token TTL max 12h — must be re-run per job)."
   return 0
 }
 
-# 디스패치: 직접 실행/소스 모두 ca_main 을 호출한다.
-# source 시 ca_main 실패는 return 으로 처리되며 export 된 변수는 보존된다.
-# (before_script 는 CODEARTIFACT_AUTH_TOKEN/CA_LOGIN_OK 로 성공을 직접 검증할 것)
-ca_main || _ca_fail "CodeArtifact 설정 중 실패"
+# Dispatch: both direct run and source call ca_main.
+# When sourced, a ca_main failure is handled via return and exported vars are preserved.
+# (before_script must verify success itself via CODEARTIFACT_AUTH_TOKEN/CA_LOGIN_OK)
+ca_main || _ca_fail "failed during CodeArtifact setup"
 
 # ──────────────────────────────────────────────────────────────────────────────
-# (옵션) systemd 타이머 백업 — before_script 가 주 갱신 경로, 타이머는 보조.
+# (optional) systemd timer backup — before_script is the primary refresh path, the timer is a backup.
 #  /etc/systemd/system/codeartifact-login.service:
 #    [Unit]
 #    Description=Refresh CodeArtifact token
