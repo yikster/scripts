@@ -8,8 +8,10 @@
 # This is the pyenv/nvm alternative to init-gitlab-runner-al2023.sh's `mise` step.
 # It installs into the gitlab-runner user's HOME (per-user layout) and replaces the
 # config.toml environment[] BASH_ENV wiring so jobs see nvm+pyenv instead of mise.
-# Run this AFTER the runner is registered (so config.toml exists) — or set
-# TUNE_CONFIG=false and wire BASH_ENV yourself.
+# It can also install the gitlab-runner binary + systemd service and register a
+# shell runner (set GITLAB_URL + GITLAB_RUNNER_TOKEN=glrt-...); registration creates
+# config.toml so the BASH_ENV wiring (STEP 6) applies in the same run. Set
+# INSTALL_RUNNER=false to skip that, or TUNE_CONFIG=false to wire BASH_ENV yourself.
 #
 # [ORDERING] This script REPLACES the mise BASH_ENV in config.toml's environment[]
 #   (it tags the block with `# env-managed-by: pyenv-nvm`). Run it AFTER
@@ -80,6 +82,15 @@ TUNE_CONFIG="${TUNE_CONFIG:-true}"
 # regional-STS pin is NOT injected into the profile/config.toml. Set true only if you
 # front packages with CodeArtifact (then run codeartifact-login.sh in before_script).
 USE_CODEARTIFACT="${USE_CODEARTIFACT:-false}"
+
+# ── GitLab Runner install/registration (optional) ─────────────────────────────
+INSTALL_RUNNER="${INSTALL_RUNNER:-true}"           # install the gitlab-runner binary + systemd service
+GITLAB_URL="${GITLAB_URL:-https://gitlab.example.com}"
+# glrt-* token from the GitLab UI (Settings > CI/CD > Runners). Empty = install but DON'T register.
+GITLAB_RUNNER_TOKEN="${GITLAB_RUNNER_TOKEN:-}"
+RUNNER_TAGS="${RUNNER_TAGS:-shell}"
+GITLAB_RUNNER_VERSION="${GITLAB_RUNNER_VERSION:-latest}"   # or pin e.g. v16.11.0
+GITLAB_RUNNER_SHA256="${GITLAB_RUNNER_SHA256:-}"          # optional binary integrity check; empty = skip
 
 # Default-first list of Python short-names for `pyenv global` (first = the `python` default).
 PY_GLOBALS="${PYENV_PYTHON_DEFAULT}"
@@ -403,6 +414,85 @@ EOF
 }
 
 # ==============================================================================
+# STEP 4c. Install the gitlab-runner binary + systemd service (+ optional register)
+# ==============================================================================
+install_gitlab_runner() {
+  if [[ "${INSTALL_RUNNER}" != "true" ]]; then
+    log "STEP 4c: skip gitlab-runner install (INSTALL_RUNNER=${INSTALL_RUNNER})"
+    return 0
+  fi
+  log "STEP 4c: install gitlab-runner (shell executor)"
+
+  if ! command -v gitlab-runner >/dev/null 2>&1; then
+    if need_egress; then
+      local arch dl
+      case "$(uname -m)" in
+        x86_64)  arch="amd64" ;;
+        aarch64) arch="arm64" ;;
+        *)       die "unsupported architecture: $(uname -m)" ;;
+      esac
+      dl="https://gitlab-runner-downloads.s3.amazonaws.com/${GITLAB_RUNNER_VERSION}/binaries/gitlab-runner-linux-${arch}"
+      log "  downloading ${dl}"
+      curl -fsSL "${dl}" -o /usr/local/bin/gitlab-runner
+      if [[ -n "${GITLAB_RUNNER_SHA256}" ]]; then
+        echo "${GITLAB_RUNNER_SHA256}  /usr/local/bin/gitlab-runner" | sha256sum -c - \
+          || die "gitlab-runner sha256 verification failed"
+      else
+        warn "GITLAB_RUNNER_SHA256 unset — skipping binary integrity verification."
+      fi
+      chmod +x /usr/local/bin/gitlab-runner
+    else
+      die "GOLDEN_AMI but the gitlab-runner binary is missing. Install it during the AMI build."
+    fi
+  else
+    log "  gitlab-runner already present: $(gitlab-runner --version 2>&1 | awk '/Version/{print $2; exit}')"
+  fi
+
+  # systemd service (idempotent), running jobs as the runtime-owner user.
+  if command -v systemctl >/dev/null 2>&1; then
+    if ! systemctl list-unit-files 2>/dev/null | grep -q '^gitlab-runner\.service'; then
+      gitlab-runner install --user="${RUNNER_USER}" --working-directory="${RUNNER_HOME}"
+    fi
+    # Enable on boot. The service is STARTED by STEP 6's `systemctl restart` AFTER BASH_ENV is
+    # wired, so jobs never run before node/python are visible. (TUNE_CONFIG=false -> you start it.)
+    systemctl enable gitlab-runner >/dev/null 2>&1 || warn "could not enable the gitlab-runner service."
+  else
+    warn "systemctl not found — installed the binary but not the service."
+  fi
+
+  register_runner
+}
+
+# Registration is idempotent on RUNNER_NAME + GITLAB_URL (mirrors the companion script).
+register_runner() {
+  if [[ -z "${GITLAB_RUNNER_TOKEN}" ]]; then
+    warn "GITLAB_RUNNER_TOKEN unset — gitlab-runner installed but NOT registered."
+    warn "  Create a runner in the GitLab UI (Settings > CI/CD > Runners), then re-run with:"
+    warn "  GITLAB_URL=${GITLAB_URL} GITLAB_RUNNER_TOKEN=glrt-... bash $0"
+    return 0
+  fi
+  # Drop server-side-removed runners before (re)registering — re-run / token-rotation safety.
+  gitlab-runner verify --delete >/dev/null 2>&1 || true
+  if [[ -f "${RUNNER_CONFIG}" ]] \
+     && grep -q "name = \"${RUNNER_NAME}\"" "${RUNNER_CONFIG}" \
+     && grep -q "url = \"${GITLAB_URL%/}\"" "${RUNNER_CONFIG}"; then
+    log "  runner '${RUNNER_NAME}' (${GITLAB_URL}) already registered — skip"
+    return 0
+  fi
+  log "  registering runner: name=${RUNNER_NAME} url=${GITLAB_URL} tags=${RUNNER_TAGS}"
+  gitlab-runner register \
+    --non-interactive \
+    --url "${GITLAB_URL%/}" \
+    --token "${GITLAB_RUNNER_TOKEN}" \
+    --name "${RUNNER_NAME}" \
+    --executor "shell" \
+    --shell "bash" \
+    --tag-list "${RUNNER_TAGS}" \
+    --run-untagged="false" \
+    --locked="false"
+}
+
+# ==============================================================================
 # STEP 5. Write the profile (login auto-source + the job shell's BASH_ENV target)
 # ==============================================================================
 write_profile() {
@@ -457,7 +547,10 @@ EOF
 # ==============================================================================
 tune_runner_config() {
   if [[ "${TUNE_CONFIG}" != "true" ]]; then
-    log "STEP 6: skipping config.toml tuning (TUNE_CONFIG=${TUNE_CONFIG})"
+    warn "STEP 6: TUNE_CONFIG=${TUNE_CONFIG} — config.toml NOT wired. If a runner was just registered"
+    warn "  it is enabled but NOT started, and jobs would not see node/python. To finish manually:"
+    warn "  add BASH_ENV=${PROFILE_D} to its [[runners]] environment[] in ${RUNNER_CONFIG},"
+    warn "  then: systemctl restart gitlab-runner"
     return 0
   fi
   log "STEP 6: wire config.toml environment[] -> BASH_ENV=${PROFILE_D}"
@@ -619,8 +712,12 @@ auto-loaded via config.toml environment[] BASH_ENV=${PROFILE_D}
     # the cdk CLI is Node-only and per-node — select a CDK-supported node first:
     nvm use 22 && cdk --version
     # Python app uses the same npm cdk CLI + the pip aws-cdk-lib library:
-    pyenv shell 3.12 && python -c "import aws_cdk; print(aws_cdk.__version__)"
+    pyenv shell 3.12 && python -c "import aws_cdk; from importlib.metadata import version; print(version('aws-cdk-lib'))"
     # (node 18 is excluded: AWS CDK support ended 2025-11-30)
+
+  GitLab Runner: ${RUNNER_NAME} (shell executor, tags: ${RUNNER_TAGS})
+    # if it was not registered (no token given), register with:
+    #   GITLAB_URL=${GITLAB_URL} GITLAB_RUNNER_TOKEN=glrt-... bash $0
 
   Matrix example: gitlab-runner/sample.pyenv-nvm.gitlab-ci.yml
 
@@ -645,6 +742,7 @@ main() {
   install_node_versions
   install_python_versions
   install_cdk
+  install_gitlab_runner
   write_profile
   tune_runner_config
   verify_runtime
