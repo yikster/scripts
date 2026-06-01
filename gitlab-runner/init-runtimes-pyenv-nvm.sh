@@ -295,7 +295,7 @@ write_profile() {
 # Managed by init-runtimes-pyenv-nvm.sh — DO NOT edit by hand.
 # Sourced by:
 #   - human login shells (SSM): /etc/profile.d/*.sh is auto-sourced, and
-#   - the gitlab-runner NON-login job shell: via config.toml environment[] BASH_ENV.
+#   - the gitlab-runner job shell: via config.toml environment[] BASH_ENV.
 # Loads pyenv (shims) + nvm (a shell function) so CI jobs can switch node/python.
 export NVM_DIR="${NVM_DIR}"
 export PYENV_ROOT="${PYENV_ROOT}"
@@ -304,18 +304,28 @@ export AWS_DEFAULT_REGION="${AWS_REGION}"
 # STS must use the regional (in-VPC) endpoint; global sts.amazonaws.com has no VPC endpoint.
 export AWS_STS_REGIONAL_ENDPOINTS=regional
 
-# pyenv: python/pip shims + 'pyenv shell <ver>' switching.
-if [ -x "\$PYENV_ROOT/bin/pyenv" ]; then
-  export PATH="\$PYENV_ROOT/bin:\$PATH"
-  eval "\$(pyenv init - bash)"
-fi
+# Re-entry guard — REQUIRED. This file is the BASH_ENV target, so it is sourced by
+# EVERY non-interactive bash. pyenv's shims/'pyenv init' and nvm.sh are themselves
+# bash scripts that spawn more bash, so each would re-source this file and re-run the
+# heavy init below, prepending \$PYENV_ROOT/bin to PATH every time until the environment
+# overflows ARG_MAX and exec dies with "Argument list too long" (E2BIG). The sentinel
+# is exported, so child bash inherits it (PATH/shims too) and skips the re-init.
+if [ -z "\${_PYENV_NVM_LOADED:-}" ]; then
+  export _PYENV_NVM_LOADED=1
 
-# nvm is a shell FUNCTION (not a binary) — it must be sourced so jobs can 'nvm use <ver>'.
-if [ -s "\$NVM_DIR/nvm.sh" ]; then
-  # shellcheck disable=SC1090
-  \. "\$NVM_DIR/nvm.sh"
-  # Expose the default node for jobs that never call 'nvm use'.
-  nvm use default >/dev/null 2>&1 || true
+  # pyenv: python/pip shims + 'pyenv shell <ver>' switching.
+  if [ -x "\$PYENV_ROOT/bin/pyenv" ]; then
+    export PATH="\$PYENV_ROOT/bin:\$PATH"
+    eval "\$(pyenv init - bash)"
+  fi
+
+  # nvm is a shell FUNCTION (not a binary) — it must be sourced so jobs can 'nvm use <ver>'.
+  if [ -s "\$NVM_DIR/nvm.sh" ]; then
+    # shellcheck disable=SC1090
+    \. "\$NVM_DIR/nvm.sh"
+    # Expose the default node for jobs that never call 'nvm use'.
+    nvm use default >/dev/null 2>&1 || true
+  fi
 fi
 EOF
   chmod 0644 "${PROFILE_D}"
