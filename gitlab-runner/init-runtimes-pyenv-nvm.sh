@@ -354,6 +354,7 @@ if [ -n "${CDK_NODE_LIST// /}" ]; then
     nvm use "$v" >/dev/null
     echo "[runner] npm -g aws-cdk@${CDK_VERSION} on $(node -v)"
     npm install -g "aws-cdk@${CDK_VERSION}"
+    cdk --version >/dev/null || { echo "cdk CLI broken/absent on node $v after npm -g install" >&2; exit 1; }
     echo "[runner]   cdk $(cdk --version)"
   done
 fi
@@ -364,7 +365,8 @@ if [ -n "${CDK_PY_LIST// /}" ]; then
     echo "[runner] pip install aws-cdk-lib+constructs on python $v"
     PYENV_VERSION="$v" python -m pip install --quiet --upgrade pip
     PYENV_VERSION="$v" python -m pip install --upgrade aws-cdk-lib constructs
-    PYENV_VERSION="$v" python -c "import aws_cdk, constructs as c; print('[runner]   aws-cdk-lib', aws_cdk.__version__, 'on python $v')"
+    # aws_cdk has no __version__ attr; read the installed distribution version via importlib.metadata.
+    PYENV_VERSION="$v" python -c "import aws_cdk, constructs; from importlib.metadata import version; print('[runner]   aws-cdk-lib', version('aws-cdk-lib'), 'on python $v')"
   done
 fi
 EOF
