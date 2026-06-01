@@ -83,6 +83,35 @@ for __v in "${PYTHON_VERSIONS[@]}"; do
 done
 unset __v
 
+# ── AWS CDK (optional) ────────────────────────────────────────────────────────
+# The `cdk` CLI is a Node/npm tool (even Python apps use it); Python adds the
+# aws-cdk-lib *library* via pip. Install CDK only on CDK-SUPPORTED runtimes,
+# verified 2026-05 against the AWS CDK docs:
+#   Node  : CDK supports each LTS until 6 months past its Node EOL. Supported now:
+#           24.x / 22.x / 20.x. Node 18 support ENDED 2025-11-30 -> excluded.
+#           (docs.aws.amazon.com/cdk/v2/guide/node-versions.html)
+#   Python: aws-cdk-lib requires_python is ~=3.10 (>=3.10,<4) -> 3.10/3.11/3.12/3.13 all OK.
+#           (pypi.org/project/aws-cdk-lib — latest 2.257.0)
+INSTALL_CDK="${INSTALL_CDK:-true}"           # set false to skip CDK entirely
+CDK_VERSION="${CDK_VERSION:-latest}"         # npm dist-tag, or pin e.g. CDK_VERSION=2.257.0
+CDK_NODE_EOL_SET="${CDK_NODE_EOL_SET:-14 16 18}"  # node majors CDK no longer supports
+CDK_PY_MIN="${CDK_PY_MIN:-3.10}"             # aws-cdk-lib floor (requires_python ~=3.10)
+
+# CDK target = the installed matrix intersected with CDK support.
+CDK_NODE_VERSIONS=()
+for __n in "${NODE_VERSIONS[@]}"; do
+  [[ " ${CDK_NODE_EOL_SET} " == *" ${__n} "* ]] || CDK_NODE_VERSIONS+=("${__n}")
+done
+CDK_PYTHON_VERSIONS=()
+for __p in "${PYTHON_VERSIONS[@]}"; do
+  # keep __p when __p >= CDK_PY_MIN (version-aware compare; GNU sort -V on AL2023)
+  [[ "$(printf '%s\n%s\n' "${CDK_PY_MIN}" "${__p}" | sort -V | head -n1)" == "${CDK_PY_MIN}" ]] \
+    && CDK_PYTHON_VERSIONS+=("${__p}")
+done
+unset __n __p
+CDK_NODE_LIST="${CDK_NODE_VERSIONS[*]}"
+CDK_PY_LIST="${CDK_PYTHON_VERSIONS[*]}"
+
 # ==============================================================================
 # Utilities
 # ==============================================================================
@@ -109,6 +138,9 @@ as_runner_stdin() {
     NVM_NODE_DEFAULT="${NVM_NODE_DEFAULT}" \
     NVM_GIT_REF="${NVM_GIT_REF}" \
     PYENV_GIT_REF="${PYENV_GIT_REF}" \
+    CDK_VERSION="${CDK_VERSION}" \
+    CDK_NODE_LIST="${CDK_NODE_LIST}" \
+    CDK_PY_LIST="${CDK_PY_LIST}" \
     bash -s
 }
 
@@ -121,6 +153,12 @@ validate_config() {
     || die "PYENV_PYTHON_DEFAULT=${PYENV_PYTHON_DEFAULT} is not in PYTHON_VERSIONS='${PYTHON_VERSIONS[*]}' — add it or change the default."
   [[ " ${NODE_VERSIONS[*]} " == *" ${NVM_NODE_DEFAULT} "* ]] \
     || warn "NVM_NODE_DEFAULT=${NVM_NODE_DEFAULT} is not in NODE_VERSIONS='${NODE_VERSIONS[*]}'; the default node alias will be dangling (jobs that call 'nvm use <ver>' still work)."
+  if [[ "${INSTALL_CDK}" == "true" ]]; then
+    [[ -n "${CDK_NODE_LIST// /}" ]] \
+      || warn "INSTALL_CDK=true but NODE_VERSIONS='${NODE_VERSIONS[*]}' has no CDK-supported version (excludes '${CDK_NODE_EOL_SET}'); the cdk CLI will be skipped."
+    [[ -n "${CDK_PY_LIST// /}" ]] \
+      || warn "INSTALL_CDK=true but PYTHON_VERSIONS='${PYTHON_VERSIONS[*]}' has nothing >= ${CDK_PY_MIN}; aws-cdk-lib will be skipped."
+  fi
 }
 
 # ==============================================================================
@@ -281,6 +319,74 @@ echo "[runner] verified Python versions: $PY_LIST"
 EOF
     then
       die "GOLDEN_AMI but a required Python version is missing. Install it during the AMI build."
+    fi
+  fi
+}
+
+# ==============================================================================
+# STEP 4b. AWS CDK — `cdk` CLI (npm -g) per supported Node + aws-cdk-lib (pip) per Python
+# ==============================================================================
+install_cdk() {
+  if [[ "${INSTALL_CDK}" != "true" ]]; then
+    log "STEP 4b: skip AWS CDK (INSTALL_CDK=${INSTALL_CDK})"
+    return 0
+  fi
+  log "STEP 4b: AWS CDK ${CDK_VERSION} — CLI on node [${CDK_NODE_LIST:-none}] + aws-cdk-lib on python [${CDK_PY_LIST:-none}]"
+  if [[ -z "${CDK_NODE_LIST// /}" && -z "${CDK_PY_LIST// /}" ]]; then
+    warn "  no CDK-supported runtime in the matrix — nothing to install."
+    return 0
+  fi
+
+  if need_egress; then
+    if ! as_runner_stdin <<'EOF'
+set -eo pipefail
+# ---- Node: install the `cdk` CLI globally for each CDK-supported node version ----
+if [ -n "${CDK_NODE_LIST// /}" ]; then
+  [ -s "$NVM_DIR/nvm.sh" ] || { echo "nvm.sh missing at $NVM_DIR" >&2; exit 1; }
+  # shellcheck disable=SC1090
+  \. "$NVM_DIR/nvm.sh"
+  for v in $CDK_NODE_LIST; do
+    nvm use "$v" >/dev/null
+    echo "[runner] npm -g aws-cdk@${CDK_VERSION} on $(node -v)"
+    npm install -g "aws-cdk@${CDK_VERSION}"
+    echo "[runner]   cdk $(cdk --version)"
+  done
+fi
+# ---- Python: install aws-cdk-lib + constructs into each supported pyenv version ----
+if [ -n "${CDK_PY_LIST// /}" ]; then
+  export PATH="$PYENV_ROOT/bin:$PYENV_ROOT/shims:$PATH"
+  for v in $CDK_PY_LIST; do
+    echo "[runner] pip install aws-cdk-lib+constructs on python $v"
+    PYENV_VERSION="$v" python -m pip install --quiet --upgrade pip
+    PYENV_VERSION="$v" python -m pip install --upgrade aws-cdk-lib constructs
+    PYENV_VERSION="$v" python -c "import aws_cdk, constructs as c; print('[runner]   aws-cdk-lib', aws_cdk.__version__, 'on python $v')"
+  done
+fi
+EOF
+    then
+      die "AWS CDK install failed (check egress/CodeArtifact and that STEP 1-4 succeeded)."
+    fi
+  else
+    # Golden AMI: verify CDK is pre-baked rather than installing.
+    if ! as_runner_stdin <<'EOF'
+set -eo pipefail
+if [ -n "${CDK_NODE_LIST// /}" ]; then
+  \. "$NVM_DIR/nvm.sh"
+  for v in $CDK_NODE_LIST; do
+    nvm use "$v" >/dev/null
+    command -v cdk >/dev/null 2>&1 || { echo "cdk CLI missing on node $v" >&2; exit 9; }
+  done
+fi
+if [ -n "${CDK_PY_LIST// /}" ]; then
+  export PATH="$PYENV_ROOT/bin:$PYENV_ROOT/shims:$PATH"
+  for v in $CDK_PY_LIST; do
+    PYENV_VERSION="$v" python -c "import aws_cdk" 2>/dev/null || { echo "aws-cdk-lib missing on python $v" >&2; exit 9; }
+  done
+fi
+echo "[runner] verified CDK present (cdk CLI on node + aws-cdk-lib on python)"
+EOF
+    then
+      die "GOLDEN_AMI but AWS CDK is missing on a supported runtime. Install it during the AMI build."
     fi
   fi
 }
@@ -491,6 +597,13 @@ auto-loaded via config.toml environment[] BASH_ENV=${PROFILE_D}
   Installed: node ${NODE_VERSIONS[*]} (default ${NVM_NODE_DEFAULT})
              python ${PYTHON_VERSIONS[*]} (default ${PYENV_PYTHON_DEFAULT})
 
+  AWS CDK (${CDK_VERSION}): cdk CLI on node [${CDK_NODE_LIST:-none}], aws-cdk-lib on python [${CDK_PY_LIST:-none}]
+    # the cdk CLI is Node-only and per-node — select a CDK-supported node first:
+    nvm use 22 && cdk --version
+    # Python app uses the same npm cdk CLI + the pip aws-cdk-lib library:
+    pyenv shell 3.12 && python -c "import aws_cdk; print(aws_cdk.__version__)"
+    # (node 18 is excluded: AWS CDK support ended 2025-11-30)
+
   Matrix example: gitlab-runner/sample.pyenv-nvm.gitlab-ci.yml
 
   WARNING: this replaced the mise BASH_ENV in config.toml. Do NOT re-run
@@ -513,6 +626,7 @@ main() {
   clone_tools
   install_node_versions
   install_python_versions
+  install_cdk
   write_profile
   tune_runner_config
   verify_runtime
