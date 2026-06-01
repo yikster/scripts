@@ -44,7 +44,7 @@ set -euo pipefail
 # ==============================================================================
 # Config (override via env). Keep names aligned with the companion scripts.
 # ==============================================================================
-AWS_REGION="${AWS_REGION:-ap-northeast-2}"
+AWS_REGION="${AWS_REGION:-us-west-2}"
 
 # gitlab-runner user/home + config (the runtimes live under this user's HOME)
 RUNNER_USER="${RUNNER_USER:-gitlab-runner}"
@@ -75,6 +75,11 @@ PROFILE_D="${PROFILE_D:-/etc/profile.d/pyenv-nvm.sh}"
 GOLDEN_AMI="${GOLDEN_AMI:-false}"
 # false = do not touch config.toml (just install + write the profile).
 TUNE_CONFIG="${TUNE_CONFIG:-true}"
+# false (DEFAULT) = no AWS CodeArtifact here: CDK/npm/pip install from the public
+# npmjs & PyPI registries over the runner's egress, and the CodeArtifact-only AWS
+# regional-STS pin is NOT injected into the profile/config.toml. Set true only if you
+# front packages with CodeArtifact (then run codeartifact-login.sh in before_script).
+USE_CODEARTIFACT="${USE_CODEARTIFACT:-false}"
 
 # Default-first list of Python short-names for `pyenv global` (first = the `python` default).
 PY_GLOBALS="${PYENV_PYTHON_DEFAULT}"
@@ -364,7 +369,11 @@ if [ -n "${CDK_PY_LIST// /}" ]; then
 fi
 EOF
     then
-      die "AWS CDK install failed (check egress/CodeArtifact and that STEP 1-4 succeeded)."
+      if [[ "${USE_CODEARTIFACT}" == "true" ]]; then
+        die "AWS CDK install failed (check CodeArtifact login/egress and that STEP 1-4 succeeded)."
+      else
+        die "AWS CDK install failed (check egress to npmjs/PyPI and that STEP 1-4 succeeded)."
+      fi
     fi
   else
     # Golden AMI: verify CDK is pre-baked rather than installing.
@@ -396,6 +405,11 @@ EOF
 # ==============================================================================
 write_profile() {
   log "STEP 5: write ${PROFILE_D}"
+  # Only pin regional STS when CodeArtifact / a private-subnet (in-VPC endpoints) setup is used.
+  local sts_pin=""
+  if [[ "${USE_CODEARTIFACT}" == "true" ]]; then
+    sts_pin=$'# STS must use the regional (in-VPC) endpoint; global sts.amazonaws.com has no VPC endpoint.\nexport AWS_STS_REGIONAL_ENDPOINTS=regional'
+  fi
   # Unquoted heredoc: ${NVM_DIR}/${AWS_REGION}/... bake in now; \$… stay literal for runtime.
   cat > "${PROFILE_D}" <<EOF
 # Managed by init-runtimes-pyenv-nvm.sh — DO NOT edit by hand.
@@ -407,8 +421,7 @@ export NVM_DIR="${NVM_DIR}"
 export PYENV_ROOT="${PYENV_ROOT}"
 export AWS_REGION="${AWS_REGION}"
 export AWS_DEFAULT_REGION="${AWS_REGION}"
-# STS must use the regional (in-VPC) endpoint; global sts.amazonaws.com has no VPC endpoint.
-export AWS_STS_REGIONAL_ENDPOINTS=regional
+${sts_pin}
 
 # Re-entry guard — REQUIRED. This file is the BASH_ENV target, so it is sourced by
 # EVERY non-interactive bash. pyenv's shims/'pyenv init' and nvm.sh are themselves
@@ -459,6 +472,7 @@ tune_runner_config() {
   NVM_DIR="${NVM_DIR}" \
   PYENV_ROOT="${PYENV_ROOT}" \
   PROFILE_D="${PROFILE_D}" \
+  USE_CODEARTIFACT="${USE_CODEARTIFACT}" \
   python3 - <<'PYEOF'
 import os, re, sys
 
@@ -484,9 +498,11 @@ env_lines = [
     f'PYENV_ROOT={pyroot}',
     f'AWS_REGION={region}',
     f'AWS_DEFAULT_REGION={region}',
-    'AWS_STS_REGIONAL_ENDPOINTS=regional',
-    f'PATH={pyroot}/bin:/usr/local/bin:/usr/bin:/bin',  # BASH_ENV prepends pyenv shims + node
 ]
+# Only pin regional STS for CodeArtifact / private-subnet (in-VPC endpoint) setups.
+if os.environ.get("USE_CODEARTIFACT") == "true":
+    env_lines.append('AWS_STS_REGIONAL_ENDPOINTS=regional')
+env_lines.append(f'PATH={pyroot}/bin:/usr/local/bin:/usr/bin:/bin')  # BASH_ENV prepends pyenv shims + node
 env_toml = "environment = [" + ", ".join(f'"{e}"' for e in env_lines) + "]"
 
 MARKER = "# env-managed-by: pyenv-nvm"
