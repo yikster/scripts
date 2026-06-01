@@ -1,0 +1,99 @@
+# =============================================================================
+# sample.pyenv-nvm.gitlab-ci.yml
+# -----------------------------------------------------------------------------
+# Reference pipeline for a SHELL-executor runner provisioned by
+# init-runtimes-pyenv-nvm.sh (nvm for Node, pyenv for Python).
+#
+# How version selection works here:
+#   - The runner runs jobs in a NON-login bash. nvm + pyenv are auto-loaded by
+#     config.toml environment[] BASH_ENV=/etc/profile.d/pyenv-nvm.sh, so the
+#     `nvm` function and `pyenv` shims are already available in every job — no
+#     `source`/activate line needed in the job script.
+#   - Node:   `nvm use <ver>`     (nvm is a shell function)
+#   - Python: `pyenv shell <ver>` (sets PYENV_VERSION for the rest of the job)
+#   - GitLab's shell executor runs all script lines in ONE bash process, so a
+#     `nvm use` / `pyenv shell` on an early line persists to later lines.
+#
+# Installed by the bootstrap: node 18/20/22/24, python 3.10/3.11/3.12/3.13.
+# (pyenv short-names like "3.12" are symlinks the bootstrap creates to the
+#  latest installed patch, so you never hard-code 3.12.x here.)
+# =============================================================================
+
+variables:
+  AWS_REGION: "ap-northeast-2"
+  AWS_DEFAULT_REGION: "ap-northeast-2"
+  AWS_STS_REGIONAL_ENDPOINTS: "regional"
+  GIT_DEPTH: "20"
+
+# Pipeline-level de-duplication: without this, the per-job `rules` below would start
+# BOTH a branch pipeline and a merge-request pipeline for the same commit when an MR
+# is open. This suppresses the duplicate once, for the whole file.
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_COMMIT_BRANCH'
+
+default:
+  tags:
+    - shell
+  before_script:
+    # Runtimes are already on PATH via BASH_ENV; this is just a visibility log.
+    - 'echo "shell defaults: node=$(node -v 2>/dev/null || echo none)  python=$(python -V 2>&1 || echo none)"'
+
+stages:
+  - versions
+  - build
+
+# =============================================================================
+# runtime-matrix: prove every installed node/python version switches and runs.
+# Each matrix leg selects a pair, then asserts the reported version matches.
+# =============================================================================
+runtime-matrix:
+  stage: versions
+  parallel:
+    matrix:
+      - NODE_VERSION: "18"
+        PYTHON_VERSION: "3.10"
+      - NODE_VERSION: "20"
+        PYTHON_VERSION: "3.11"
+      - NODE_VERSION: "22"
+        PYTHON_VERSION: "3.12"
+      - NODE_VERSION: "24"
+        PYTHON_VERSION: "3.13"
+  script:
+    - nvm use "${NODE_VERSION}"
+    - pyenv shell "${PYTHON_VERSION}"
+    - 'echo "selected node=$(node -v)  python=$(python -V 2>&1)"'
+    - 'node -v   | grep -q "^v${NODE_VERSION}\."        || { echo "node version mismatch";   exit 1; }'
+    - 'python -V 2>&1 | grep -q "Python ${PYTHON_VERSION}\." || { echo "python version mismatch"; exit 1; }'
+    # ... run the real per-version work here (tests, lint, build) ...
+    - node -e "console.log('node ok:', process.version)"
+    - python -c "import sys; print('python ok:', sys.version.split()[0])"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+
+# =============================================================================
+# build:node22-py312: a concrete single-pair job (newest defaults).
+# =============================================================================
+build:node22-py312:
+  stage: build
+  script:
+    - nvm use 22
+    - pyenv shell 3.12
+    - 'echo "build with node=$(node -v)  python=$(python -V 2>&1)"'
+    # npm ci / npm run build / pip install -r requirements.txt / pytest ...
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+
+# =============================================================================
+# [NOTE] To pin runtimes per-repo instead of per-job, drop version files at the
+#        repo root and the shims pick them up automatically:
+#          .nvmrc            ->  20
+#          .python-version   ->  3.11
+#        With .nvmrc you still need `nvm use` (nvm reads .nvmrc when no arg given:
+#        `nvm use`); pyenv reads .python-version automatically via its shims.
+# =============================================================================
