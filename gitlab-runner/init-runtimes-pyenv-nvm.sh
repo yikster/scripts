@@ -143,12 +143,17 @@ install_build_deps() {
   log "STEP 1: build toolchain + headers (GOLDEN_AMI=${GOLDEN_AMI})"
   if need_egress; then
     command -v dnf >/dev/null 2>&1 || die "dnf not found — this script targets RHEL/Amazon Linux 2023."
+    # NOTE: AL2023 ships curl-minimal (it already provides /usr/bin/curl). Do NOT list
+    # bare `curl` here — dnf would try to swap in the full `curl` from the base repo
+    # (e.g. 8.5) over the newer installed curl-minimal (e.g. 8.17) and abort on the
+    # libcurl vs libcurl-minimal conflict. Pull a curl only if none exists at all.
     dnf install -y \
-      git curl tar gzip xz which findutils \
+      git tar gzip xz which findutils \
       gcc gcc-c++ make patch \
       zlib-devel bzip2 bzip2-devel readline-devel \
       sqlite sqlite-devel openssl-devel tk-devel \
       libffi-devel xz-devel gdbm-devel ncurses-devel libuuid-devel
+    command -v curl >/dev/null 2>&1 || dnf install -y --allowerasing curl
   else
     # Golden AMI: the runtime needs no compiler. Nothing to do here.
     log "  GOLDEN_AMI mode — skipping dnf (no compiler needed to *run* prebuilt versions)"
